@@ -22,9 +22,18 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
         didSet {
             guard oldValue != host else { return }
             UserDefaults.standard.set(host, forKey: "deviceIP")
+            if chroma.isConnected {
+                let newHost = host
+                chroma.stop()
+                chroma = ChromaSession(host: newHost)
+                chroma.start()
+            }
             connectNow()
         }
     }
+
+    /// Alternative low-latency control channel (UDP 55444 token session).
+    var chroma: ChromaSession
 
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "yeelight.client.queue")
@@ -37,6 +46,7 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
 
     init(host: String) {
         self.host = host
+        self.chroma = ChromaSession(host: host)
     }
 
     // MARK: - Connection
@@ -265,6 +275,15 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
 
     func setPower(_ on: Bool) async throws {
         _ = try await command("set_power", [on ? "on" : "off", "smooth", 500])
+        if !on {
+            // The lamp sometimes acknowledges set_power off but stays on;
+            // verify and fall back to dev_toggle.
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            if let result = try? await command("get_prop", ["power"]),
+               (result.first as? String) == "on" {
+                _ = try await command("dev_toggle", [])
+            }
+        }
     }
 
     func setBright(_ value: Int) async throws {
@@ -277,6 +296,13 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
 
     func setBGPower(_ on: Bool) async throws {
         _ = try await command("bg_set_power", [on ? "on" : "off", "smooth", 500])
+        if !on {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            if let result = try? await command("get_prop", ["bg_power"]),
+               (result.first as? String) == "on" {
+                _ = try await command("bg_set_power", ["off", "sudden", 0])
+            }
+        }
     }
 
     func setBGBright(_ value: Int) async throws {
@@ -289,6 +315,57 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
 
     func setBGCT(_ value: Int) async throws {
         _ = try await command("bg_set_ct_abx", [value, "smooth", 200])
+    }
+
+    // MARK: - Timer (cron)
+
+    /// Schedule a power-off after `minutes` (device-side, in 30-minute units).
+    func setCronOff(afterMinutes minutes: Int) async throws {
+        let units = min(24, max(1, Int(round(Double(minutes) / 30))))
+        _ = try await command("cron_add", [0, units, 0])
+    }
+
+    /// Remaining delay in minutes of the scheduled power-off, or nil.
+    func getCronOffDelayMinutes() async throws -> Int? {
+        let result = try await command("cron_get", [0])
+        guard let entry = result.first as? [String: Any],
+              let delay = entry["delay"] as? Int else { return nil }
+        return delay * 30
+    }
+
+    func cancelCronOff() async throws {
+        _ = try await command("cron_del", [0])
+    }
+
+    // MARK: - Color flow
+
+    /// Run an animated color flow on the backlight. Expression format:
+    /// "duration, mode, value, brightness" steps joined by ";".
+    /// (mode 1 = RGB color, 2 = CT, 3 = HSV)
+    func startBGColorFlow(_ expression: String) async throws {
+        let steps = expression.split(separator: ";").count
+        _ = try await command("bg_start_cf", [steps, 0, expression])
+    }
+
+    func stopBGColorFlow() async throws {
+        _ = try await command("bg_stop_cf", [])
+    }
+
+    func startMainColorFlow(_ expression: String) async throws {
+        let steps = expression.split(separator: ";").count
+        _ = try await command("start_cf", [steps, 0, expression])
+    }
+
+    func stopMainColorFlow() async throws {
+        _ = try await command("stop_cf", [])
+    }
+
+    // MARK: - Segments
+
+    /// Set the RGB color of backlight segment range [start, end].
+    /// Segment indexing/layout is device-dependent; verify visually.
+    func setSegmentRGB(start: Int, end: Int, rgb: Int) async throws {
+        _ = try await command("set_segment_rgb", [start, end, rgb, "smooth", 300])
     }
 
     @MainActor
