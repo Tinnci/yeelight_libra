@@ -22,18 +22,23 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
         didSet {
             guard oldValue != host else { return }
             UserDefaults.standard.set(host, forKey: "deviceIP")
-            if chroma.isConnected {
-                let newHost = host
-                chroma.stop()
-                chroma = ChromaSession(host: newHost)
-                chroma.start()
-            }
+            // Recreate the UDP session for the new address even when it is not
+            // connected yet; ChromaSession.host is immutable, so keeping the old
+            // instance would make the channel talk to the previous IP forever.
+            let wasRunning = chroma.isRunning
+            chroma.stop()
+            chroma = ChromaSession(host: host)
+            if wasRunning { chroma.start() }
             connectNow()
         }
     }
 
     /// Alternative low-latency control channel (UDP 55444 token session).
-    var chroma: ChromaSession
+    /// Republished so the UI can observe connection-state changes.
+    @Published var chroma: ChromaSession {
+        didSet { bindChroma() }
+    }
+    @Published private(set) var chromaConnected = false
 
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "yeelight.client.queue")
@@ -43,10 +48,21 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
     private var reconnectTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
     private var generation = 0
+    private var chromaCancellable: AnyCancellable?
 
     init(host: String) {
         self.host = host
         self.chroma = ChromaSession(host: host)
+        bindChroma()
+    }
+
+    private func bindChroma() {
+        chromaCancellable?.cancel()
+        chromaCancellable = chroma.$isConnected
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] connected in
+                self?.chromaConnected = connected
+            }
     }
 
     // MARK: - Connection
@@ -342,9 +358,9 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
     /// Run an animated color flow on the backlight. Expression format:
     /// "duration, mode, value, brightness" steps joined by ";".
     /// (mode 1 = RGB color, 2 = CT, 3 = HSV)
+    /// Passes count 0 so the flow repeats until `stopBGColorFlow()` is called.
     func startBGColorFlow(_ expression: String) async throws {
-        let steps = expression.split(separator: ";").count
-        _ = try await command("bg_start_cf", [steps, 0, expression])
+        _ = try await command("bg_start_cf", [0, 0, expression])
     }
 
     func stopBGColorFlow() async throws {
@@ -352,8 +368,7 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
     }
 
     func startMainColorFlow(_ expression: String) async throws {
-        let steps = expression.split(separator: ";").count
-        _ = try await command("start_cf", [steps, 0, expression])
+        _ = try await command("start_cf", [0, 0, expression])
     }
 
     func stopMainColorFlow() async throws {

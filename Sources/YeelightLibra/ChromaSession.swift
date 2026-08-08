@@ -41,10 +41,14 @@ final class ChromaSession: ObservableObject, @unchecked Sendable {
         conn.start(queue: queue)
     }
 
+    /// True while the UDP socket is up, even before the handshake completes.
+    var isRunning: Bool { socket != nil }
+
     func stop() {
         generation += 1
         keepAliveTask?.cancel()
         keepAliveTask = nil
+        token = ""
         socket?.cancel()
         socket = nil
         DispatchQueue.main.async { [weak self] in

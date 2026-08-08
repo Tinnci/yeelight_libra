@@ -7,6 +7,10 @@ import AppKit
 struct NativeSlider: NSViewRepresentable {
     let value: Binding<Double>
     let range: ClosedRange<Double>
+    /// Fired only for user-driven drags, never for programmatic updates.
+    /// Sending commands from here (instead of `onChange` of the binding) avoids
+    /// echoing commands back when the lamp's `props` notifications move the slider.
+    var onUserChange: ((Double) -> Void)?
 
     func makeNSView(context: Context) -> NSSlider {
         let slider = NSSlider()
@@ -19,6 +23,7 @@ struct NativeSlider: NSViewRepresentable {
     }
 
     func updateNSView(_ slider: NSSlider, context: Context) {
+        context.coordinator.parent = self
         slider.minValue = range.lowerBound
         slider.maxValue = range.upperBound
         if slider.doubleValue != value.wrappedValue {
@@ -39,6 +44,7 @@ struct NativeSlider: NSViewRepresentable {
 
         @objc func valueChanged(_ sender: NSSlider) {
             parent.value.wrappedValue = sender.doubleValue
+            parent.onUserChange?(sender.doubleValue)
         }
     }
 }
@@ -148,7 +154,7 @@ struct MenuBarPanel: View {
             HStack {
                 Toggle("Chroma UDP 通道", isOn: $chromaEnabled)
                 Spacer()
-                statusDot(client.chroma.isConnected, label: client.chroma.isConnected ? "已连接" : "未连接")
+                statusDot(client.chromaConnected, label: client.chromaConnected ? "已连接" : "未连接")
             }
             .toggleStyle(.switch)
 
@@ -203,7 +209,7 @@ struct MenuBarPanel: View {
     }
 
     private func sendBGColor(_ rgb: Int) {
-        if chromaEnabled && client.chroma.isConnected {
+        if chromaEnabled && client.chromaConnected {
             client.chroma.bgSetRGB(rgb)
         } else {
             Task { try? await client.setBGRGB(rgb) }
@@ -284,10 +290,9 @@ struct MenuBarPanel: View {
     ) -> some View {
         HStack {
             Text(label).frame(width: 34, alignment: .leading)
-            NativeSlider(value: value, range: range)
-                .onChange(of: value.wrappedValue) { _, newValue in
-                    debounced { send(newValue) }
-                }
+            NativeSlider(value: value, range: range) { newValue in
+                debounced { send(newValue) }
+            }
             Text("\(Int(value.wrappedValue))")
                 .monospacedDigit()
                 .frame(width: 34, alignment: .trailing)
@@ -301,7 +306,7 @@ struct MenuBarPanel: View {
                 if keyPath == \LightState.power {
                     Task { try? await client.setPower(on) }
                 } else {
-                    if chromaEnabled && client.chroma.isConnected {
+                    if chromaEnabled && client.chromaConnected {
                         client.chroma.bgSetPower(on)
                     } else {
                         Task { try? await client.setBGPower(on) }
