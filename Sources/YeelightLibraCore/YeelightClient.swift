@@ -333,6 +333,25 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
         _ = try await command("bg_set_ct_abx", [value, "smooth", 200])
     }
 
+    /// Apply a one-shot scene preset: main-light and backlight settings in one tap.
+    /// Channels that are off skip their value commands.
+    func applyScene(_ scene: ScenePreset) async throws {
+        if scene.mainPower {
+            try await setPower(true)
+            try await setBright(scene.mainBright)
+            try await setCT(scene.mainCT)
+        } else {
+            try await setPower(false)
+        }
+        if scene.bgPower {
+            try await setBGPower(true)
+            try await setBGRGB(scene.bgRGB)
+            try await setBGBright(scene.bgBright)
+        } else {
+            try await setBGPower(false)
+        }
+    }
+
     // MARK: - Timer (cron)
 
     /// Schedule a power-off after `minutes` (device-side, in 30-minute units).
