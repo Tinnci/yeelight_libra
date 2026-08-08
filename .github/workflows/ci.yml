@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: Build & Test (macOS)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build (debug)
+        run: swift build
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Package .app
+        run: ./make_app.sh
+
+      - name: Upload .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: YeelightLibra.app
+          path: YeelightLibra.app
+          if-no-files-found: error
