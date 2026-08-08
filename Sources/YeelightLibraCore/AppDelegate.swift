@@ -1,11 +1,13 @@
 import AppKit
 import SwiftUI
+import Combine
 
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var client: YeelightClient!
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private let dockActions = DockActions()
+    private var statusCancellable: AnyCancellable?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         let host = UserDefaults.standard.string(forKey: "deviceIP") ?? YeelightClient.defaultHost
@@ -21,12 +23,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            button.image = NSImage(systemSymbolName: "lamp.desk.fill",
-                                   accessibilityDescription: "Yeelight Libra")
+            let image = NSImage(systemSymbolName: "lamp.desk.fill",
+                                accessibilityDescription: "Yeelight Libra")
+            image?.isTemplate = true
+            button.image = image
             button.target = self
             button.action = #selector(statusItemClicked(_:))
         }
         statusItem = item
+        // Immediate visual feedback: tint the icon by TCP connection state.
+        updateStatusIcon(connected: client.isConnected)
+        statusCancellable = client.$isConnected
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] connected in
+                self?.updateStatusIcon(connected: connected)
+            }
+    }
+
+    /// Green icon while connected, red while disconnected, with a tooltip
+    /// summarizing the state.
+    private func updateStatusIcon(connected: Bool) {
+        guard let button = statusItem?.button else { return }
+        button.contentTintColor = connected ? .systemGreen : .systemRed
+        button.toolTip = connected ? "已连接 \(client.host)" : "未连接，将自动重连"
     }
 
     @objc private func statusItemClicked(_ sender: Any?) {
