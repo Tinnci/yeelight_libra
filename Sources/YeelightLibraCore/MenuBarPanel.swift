@@ -102,6 +102,20 @@ struct MenuBarPanel: View {
 
             Divider()
 
+            sectionTitle("场景")
+            HStack {
+                ForEach(ScenePreset.all) { scene in
+                    Button(scene.name) {
+                        Task { try? await client.applyScene(scene) }
+                    }
+                }
+                Spacer()
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+
+            Divider()
+
             sectionTitle("定时与流光")
             Picker("定时关灯", selection: $cronOption) {
                 Text("取消").tag(0)
