@@ -7,9 +7,18 @@ let package = Package(
         .macOS(.v14)
     ],
     targets: [
+        .target(
+            name: "YeelightLibraCore",
+            path: "Sources/YeelightLibraCore"
+        ),
         .executableTarget(
             name: "YeelightLibra",
+            dependencies: ["YeelightLibraCore"],
             path: "Sources/YeelightLibra"
+        ),
+        .testTarget(
+            name: "YeelightLibraTests",
+            dependencies: ["YeelightLibraCore"]
         )
     ]
 )

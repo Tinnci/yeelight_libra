@@ -10,12 +10,12 @@ import Combine
 final class ChromaSession: ObservableObject, @unchecked Sendable {
     @Published var isConnected = false
 
-    private let host: String
+    let host: String
     private static let port = NWEndpoint.Port(rawValue: 55444)!
 
     private let queue = DispatchQueue(label: "yeelight.chroma.queue")
     private var socket: NWConnection?
-    private var token = ""
+    var token = ""
     private var nextID = 1
     private var generation = 0
     private var keepAliveTask: Task<Void, Never>?

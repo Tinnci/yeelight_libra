@@ -1,13 +1,13 @@
 import AppKit
 import SwiftUI
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+public final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var client: YeelightClient!
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private let dockActions = DockActions()
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    public func applicationDidFinishLaunching(_ notification: Notification) {
         let host = UserDefaults.standard.string(forKey: "deviceIP") ?? YeelightClient.defaultHost
         client = YeelightClient(host: host)
         dockActions.client = client
@@ -55,16 +55,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Dock menu
 
-    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+    public func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         dockActions.menu()
     }
 
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showPanel()
         return true
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    public func applicationWillTerminate(_ notification: Notification) {
         client?.disconnect()
     }
 }

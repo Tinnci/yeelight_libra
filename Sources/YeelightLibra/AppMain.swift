@@ -1,4 +1,5 @@
 import SwiftUI
+import YeelightLibraCore
 
 @main
 struct YeelightLibraApp: App {
