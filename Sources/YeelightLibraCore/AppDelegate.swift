@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Combine
 
+@MainActor
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var client: YeelightClient!
     private var statusItem: NSStatusItem?
@@ -15,6 +16,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         client = YeelightClient(host: host)
         autoController = AutoModeController(client: client)
         dockActions.client = client
+        dockActions.autoController = autoController
         dockActions.showPanel = { [weak self] in self?.showPanel() }
         client.start()
         setupStatusItem()

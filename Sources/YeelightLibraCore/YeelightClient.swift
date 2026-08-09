@@ -2,18 +2,17 @@ import Foundation
 import Network
 import Combine
 
-/// TCP JSON client for the Yeelight LAN control protocol (port 55443).
+/// Main-actor isolated TCP JSON client for Yeelight's LAN protocol.
 ///
-/// Commands are newline-terminated JSON `{"id":N,"method":"...","params":[...]}`.
-/// The lamp answers with `{"id":N,"result":[...]}` and asynchronously pushes
-/// `{"method":"props","params":{...}}` notifications.
-///
-/// All `@Published` state mutations happen on the main thread to avoid racing
-/// Combine's `objectWillChange` (a background `@Published` write concurrent
-/// with a main-thread one can deadlock the publisher's internal lock).
-final class YeelightClient: ObservableObject, @unchecked Sendable {
+/// The socket callbacks are bridged back to the main actor so connection
+/// state, request IDs, response matching, and the published state mirror all
+/// have one owner. This avoids the old split between an NWConnection queue and
+/// arbitrary Tasks.
+@MainActor
+final class YeelightClient: ObservableObject {
     @Published var state = LightState()
     @Published var isConnected = false
+    @Published private(set) var capabilities = DeviceCapabilities()
 
     static let defaultPort: NWEndpoint.Port = 55443
     static let defaultHost = "192.168.3.111"
@@ -22,33 +21,50 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
         didSet {
             guard oldValue != host else { return }
             UserDefaults.standard.set(host, forKey: "deviceIP")
-            // Recreate the UDP session for the new address even when it is not
-            // connected yet; ChromaSession.host is immutable, so keeping the old
-            // instance would make the channel talk to the previous IP forever.
+
             let wasRunning = chroma.isRunning
             chroma.stop()
             chroma = ChromaSession(host: host)
             if wasRunning { chroma.start() }
+
+            // Never expose the previous device's state while the new address
+            // is connecting.
+            state = LightState()
+            hasMainPowerProperty = false
+            capabilities = DeviceCapabilities()
+            isConnected = false
             connectNow()
         }
     }
 
     /// Alternative low-latency control channel (UDP 55444 token session).
-    /// Republished so the UI can observe connection-state changes.
     @Published var chroma: ChromaSession {
         didSet { bindChroma() }
     }
     @Published private(set) var chromaConnected = false
 
     private var connection: NWConnection?
-    private let queue = DispatchQueue(label: "yeelight.client.queue")
     private var buffer = Data()
     private var nextID = 1
-    private var pending: [Int: (Result<[Any], Error>) -> Void] = [:]
+
+    /// JSONSerialization represents protocol arrays as [Any], which is not
+    /// statically Sendable even though this entire value stays on the main
+    /// actor. Keep the actor boundary explicit at the continuation.
+    private struct CommandResult: @unchecked Sendable {
+        let values: [Any]
+    }
+
+    private struct PendingCommand {
+        let handler: (Result<CommandResult, Error>) -> Void
+        let timeout: DispatchWorkItem
+    }
+
+    private var pending: [Int: PendingCommand] = [:]
     private var reconnectTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
     private var generation = 0
     private var chromaCancellable: AnyCancellable?
+    private var hasMainPowerProperty = false
 
     init(host: String) {
         self.host = host
@@ -79,57 +95,70 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
         watchdogTask = nil
         connection?.cancel()
         connection = nil
-        DispatchQueue.main.async { [weak self] in
-            self?.isConnected = false
-        }
+        buffer.removeAll(keepingCapacity: false)
+        failAllPending(with: "连接已断开")
+        isConnected = false
     }
 
     private func connectNow() {
         reconnectTask?.cancel()
         reconnectTask = nil
+        watchdogTask?.cancel()
+        watchdogTask = nil
         generation += 1
         let gen = generation
+
         connection?.cancel()
+        connection = nil
+        buffer.removeAll(keepingCapacity: false)
+        failAllPending(with: "连接已重置")
+        isConnected = false
 
         let conn = NWConnection(
             host: NWEndpoint.Host(host),
             port: Self.defaultPort,
-            using: .tcp
-        )
+            using: .tcp)
         connection = conn
         conn.stateUpdateHandler = { [weak self] state in
-            guard let self, gen == self.generation else { return }
-            switch state {
-            case .ready:
-                self.onReady(gen: gen)
-            case .waiting(let error):
-                // transient: the path will recover on its own; only guard against
-                // getting stuck in waiting forever.
-                Logger.log("conn gen \(gen): waiting (\(error))")
-                self.scheduleWaitingWatchdog(gen: gen)
-            case .failed(let error):
-                Logger.log("conn gen \(gen): failed (\(error))")
-                self.onFailure(gen: gen)
-            default:
-                break
+            Task { @MainActor [weak self] in
+                self?.handleConnectionState(state, gen: gen)
             }
         }
-        conn.start(queue: queue)
+        conn.start(queue: .main)
+    }
+
+    private func handleConnectionState(_ state: NWConnection.State, gen: Int) {
+        guard gen == generation else { return }
+        switch state {
+        case .ready:
+            onReady(gen: gen)
+        case .waiting(let error):
+            Logger.log("conn gen \(gen): waiting (\(error))")
+            scheduleWaitingWatchdog(gen: gen)
+        case .failed(let error):
+            Logger.log("conn gen \(gen): failed (\(error))")
+            onFailure(gen: gen)
+        case .cancelled:
+            if connection != nil { onFailure(gen: gen) }
+        default:
+            break
+        }
     }
 
     private func onReady(gen: Int) {
         guard gen == generation else { return }
         watchdogTask?.cancel()
-        DispatchQueue.main.async { [weak self] in
-            self?.isConnected = true
-            Logger.log("connected to \(self?.host ?? "")")
-        }
+        isConnected = true
+        Logger.log("connected to \(host)")
         receiveLoop(gen: gen)
         Task { @MainActor [weak self] in
-            guard gen == self?.generation else { return }
+            guard let self, gen == self.generation else { return }
             do {
-                try await self?.refresh()
-                Logger.log("state: power=\(self?.state.power ?? false) bright=\(self?.state.bright ?? 0) ct=\(self?.state.ct ?? 0) bgPower=\(self?.state.bgPower ?? false) bgRGB=\(self?.state.bgRGB ?? 0)")
+                try await self.refresh()
+                Logger.log(
+                    "state: power=\(self.state.power) mainPower=\(self.state.mainPower) "
+                    + "bright=\(self.state.bright) ct=\(self.state.ct) "
+                    + "bgPower=\(self.state.bgPower) bgRGB=\(self.state.bgRGB)")
             } catch {
                 Logger.log("refresh failed: \(error)")
             }
@@ -138,16 +167,19 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
 
     private func onFailure(gen: Int) {
         guard gen == generation else { return }
-        DispatchQueue.main.async { [weak self] in
-            self?.isConnected = false
-        }
-        failAllPending()
-        scheduleReconnect(gen: gen)
+        generation += 1
+        let reconnectGeneration = generation
+        connection?.cancel()
+        connection = nil
+        buffer.removeAll(keepingCapacity: false)
+        isConnected = false
+        failAllPending(with: "连接已断开")
+        scheduleReconnect(gen: reconnectGeneration)
     }
 
     private func scheduleReconnect(gen: Int) {
         reconnectTask?.cancel()
-        reconnectTask = Task { [weak self] in
+        reconnectTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             guard !Task.isCancelled else { return }
             guard let self, gen == self.generation else { return }
@@ -155,11 +187,9 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// If the connection lingers in `.waiting`/`.preparing` for too long
-    /// (e.g. the device is unreachable), force a fresh attempt.
     private func scheduleWaitingWatchdog(gen: Int) {
         watchdogTask?.cancel()
-        watchdogTask = Task { [weak self] in
+        watchdogTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 6_000_000_000)
             guard !Task.isCancelled else { return }
             guard let self, gen == self.generation else { return }
@@ -172,16 +202,18 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
     private func receiveLoop(gen: Int) {
         guard gen == generation else { return }
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            guard let self, gen == self.generation else { return }
-            if let data, !data.isEmpty {
-                self.buffer.append(data)
-                self.processBuffer()
+            Task { @MainActor [weak self] in
+                guard let self, gen == self.generation else { return }
+                if let data, !data.isEmpty {
+                    self.buffer.append(data)
+                    self.processBuffer()
+                }
+                if isComplete || error != nil {
+                    self.onFailure(gen: gen)
+                    return
+                }
+                self.receiveLoop(gen: gen)
             }
-            if isComplete || error != nil {
-                self.onFailure(gen: gen)
-                return
-            }
-            self.receiveLoop(gen: gen)
         }
     }
 
@@ -203,36 +235,40 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
 
         if let method = object["method"] as? String, method == "props",
            let params = object["params"] as? [String: Any] {
-            DispatchQueue.main.async { [weak self] in
-                self?.applyProps(params)
-            }
+            applyProps(params)
             return
         }
 
-        guard let id = object["id"] as? Int, let handler = pending.removeValue(forKey: id) else { return }
+        guard let id = Self.intOrNil(object["id"]),
+              let command = pending.removeValue(forKey: id) else { return }
+        command.timeout.cancel()
+
         if let result = object["result"] as? [Any] {
-            DispatchQueue.main.async { handler(.success(result)) }
+            command.handler(.success(CommandResult(values: result)))
         } else if let error = object["error"] as? [String: Any],
                   let message = error["message"] as? String {
-            DispatchQueue.main.async {
-                handler(.failure(NSError(domain: "yeelight", code: -1,
-                                         userInfo: [NSLocalizedDescriptionKey: message])))
-            }
+            command.handler(.failure(NSError(
+                domain: "yeelight",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: message])))
         } else {
-            DispatchQueue.main.async {
-                handler(.failure(NSError(domain: "yeelight", code: -2,
-                                         userInfo: [NSLocalizedDescriptionKey: "无法解析响应"])))
-            }
+            command.handler(.failure(NSError(
+                domain: "yeelight",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "无法解析响应"])))
         }
     }
 
-    private func failAllPending() {
-        let handlers = pending
+    private func failAllPending(with message: String) {
+        let commands = pending
         pending.removeAll()
-        let error = NSError(domain: "yeelight", code: -3,
-                            userInfo: [NSLocalizedDescriptionKey: "连接已断开"])
-        for handler in handlers.values {
-            DispatchQueue.main.async { handler(.failure(error)) }
+        let error = NSError(
+            domain: "yeelight",
+            code: -3,
+            userInfo: [NSLocalizedDescriptionKey: message])
+        for command in commands.values {
+            command.timeout.cancel()
+            command.handler(.failure(error))
         }
     }
 
@@ -242,63 +278,54 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
     func command(_ method: String, _ params: [Any]) async throws -> [Any] {
         let id = nextID
         nextID += 1
-        let payload: [String: Any] = ["id": id, "method": method, "params": params]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload),
-              var text = String(data: data, encoding: .utf8)
-        else {
-            throw NSError(domain: "yeelight", code: -4,
-                          userInfo: [NSLocalizedDescriptionKey: "命令编码失败"])
-        }
-        text += "\r\n"
+        let data = try YeelightProtocol.commandLine(id: id, method: method, params: params)
 
-        return try await withCheckedThrowingContinuation { continuation in
-            queue.async { [weak self] in
-                guard let self, let conn = self.connection, conn.state == .ready else {
-                    continuation.resume(throwing: NSError(
-                        domain: "yeelight", code: -5,
-                        userInfo: [NSLocalizedDescriptionKey: "未连接设备"]))
-                    return
-                }
-                self.pending[id] = { result in
-                    continuation.resume(with: result)
-                }
-                let timeout = DispatchWorkItem { [weak self] in
-                    self?.queue.async {
-                        if let handler = self?.pending.removeValue(forKey: id) {
-                            DispatchQueue.main.async {
-                                handler(.failure(NSError(
-                                    domain: "yeelight", code: -6,
-                                    userInfo: [NSLocalizedDescriptionKey: "命令超时"])))
-                            }
-                        }
-                    }
-                }
-                self.queue.asyncAfter(deadline: .now() + 8, execute: timeout)
-                conn.send(content: Data(text.utf8), completion: .contentProcessed { error in
-                    if let error {
-                        timeout.cancel()
-                        self.queue.async {
-                            self.pending.removeValue(forKey: id)
-                            continuation.resume(throwing: error)
-                        }
-                    }
-                })
+        let result: CommandResult = try await withCheckedThrowingContinuation { continuation in
+            guard let conn = connection, conn.state == .ready else {
+                continuation.resume(throwing: NSError(
+                    domain: "yeelight",
+                    code: -5,
+                    userInfo: [NSLocalizedDescriptionKey: "未连接设备"]))
+                return
             }
+
+            let timeout = DispatchWorkItem { [weak self] in
+                guard let self, let command = self.pending.removeValue(forKey: id) else { return }
+                command.handler(.failure(NSError(
+                    domain: "yeelight",
+                    code: -6,
+                    userInfo: [NSLocalizedDescriptionKey: "命令超时"])))
+            }
+            pending[id] = PendingCommand(
+                handler: { result in continuation.resume(with: result) },
+                timeout: timeout)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: timeout)
+
+            conn.send(content: data, completion: .contentProcessed { [weak self] error in
+                guard let error else { return }
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          let command = self.pending.removeValue(forKey: id) else { return }
+                    command.timeout.cancel()
+                    command.handler(.failure(error))
+                }
+            })
         }
+        return result.values
     }
 
     // MARK: - Convenience API
 
     func setPower(_ on: Bool) async throws {
+        let previousBacklight = state.bgPower
         _ = try await command("set_power", [on ? "on" : "off", "smooth", 500])
-        if !on {
-            // The lamp sometimes acknowledges set_power off but stays on;
-            // verify and fall back to dev_toggle.
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            if let result = try? await command("get_prop", ["power"]),
-               (result.first as? String) == "on" {
-                _ = try await command("dev_toggle", [])
-            }
+
+        // Some dual-zone devices couple `set_power` to the background light.
+        // Reassert the previous background state so this API remains a main
+        // light operation instead of falling back to dev_toggle (which toggles
+        // both zones).
+        if hasMainPowerProperty || previousBacklight {
+            try await setBGPower(previousBacklight)
         }
     }
 
@@ -334,7 +361,6 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
     }
 
     /// Apply a one-shot scene preset: main-light and backlight settings in one tap.
-    /// Channels that are off skip their value commands.
     func applyScene(_ scene: ScenePreset) async throws {
         if scene.mainPower {
             try await setPower(true)
@@ -354,18 +380,21 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
 
     // MARK: - Timer (cron)
 
-    /// Schedule a power-off after `minutes` (device-side, in 30-minute units).
+    static func cronOffParameters(afterMinutes minutes: Int) -> [Int] {
+        [0, max(1, minutes)]
+    }
+
+    /// The protocol takes the delay directly in minutes.
     func setCronOff(afterMinutes minutes: Int) async throws {
-        let units = min(24, max(1, Int(round(Double(minutes) / 30))))
-        _ = try await command("cron_add", [0, units, 0])
+        _ = try await command("cron_add", Self.cronOffParameters(afterMinutes: minutes))
     }
 
     /// Remaining delay in minutes of the scheduled power-off, or nil.
     func getCronOffDelayMinutes() async throws -> Int? {
         let result = try await command("cron_get", [0])
         guard let entry = result.first as? [String: Any],
-              let delay = entry["delay"] as? Int else { return nil }
-        return delay * 30
+              let delay = Self.intOrNil(entry["delay"]) else { return nil }
+        return delay
     }
 
     func cancelCronOff() async throws {
@@ -374,10 +403,6 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
 
     // MARK: - Color flow
 
-    /// Run an animated color flow on the backlight. Expression format:
-    /// "duration, mode, value, brightness" steps joined by ";".
-    /// (mode 1 = RGB color, 2 = CT, 3 = HSV)
-    /// Passes count 0 so the flow repeats until `stopBGColorFlow()` is called.
     func startBGColorFlow(_ expression: String) async throws {
         _ = try await command("bg_start_cf", [0, 0, expression])
     }
@@ -396,61 +421,79 @@ final class YeelightClient: ObservableObject, @unchecked Sendable {
 
     // MARK: - Segments
 
-    /// Set the RGB color of backlight segment range [start, end].
-    /// Segment indexing/layout is device-dependent; verify visually.
+    /// Device-specific extension; callers should only expose it when the
+    /// device advertises `set_segment_rgb` in its support list.
     func setSegmentRGB(start: Int, end: Int, rgb: Int) async throws {
+        guard supports("set_segment_rgb") else {
+            throw unsupportedMethod("set_segment_rgb")
+        }
         _ = try await command("set_segment_rgb", [start, end, rgb, "smooth", 300])
     }
 
+    func supports(_ method: String) -> Bool {
+        capabilities.supports(method)
+    }
+
+    // MARK: - State
+
     @MainActor
     func refresh() async throws {
-        let props = ["power", "bright", "ct", "color_mode",
-                     "bg_power", "bg_bright", "bg_rgb", "bg_ct", "name"]
-        let result = try await command("get_prop", props)
-        guard result.count >= props.count else { return }
+        let coreProps = ["power", "bright", "ct", "color_mode", "name"]
+        let coreResult = try await command("get_prop", coreProps)
+        guard coreResult.count >= coreProps.count else { return }
 
-        var updated = state
-        updated.power = (result[0] as? String) == "on"
-        updated.bright = Self.int(result[1], fallback: updated.bright)
-        updated.ct = Self.int(result[2], fallback: updated.ct)
-        updated.colorMode = Self.int(result[3], fallback: updated.colorMode)
-        updated.bgPower = (result[4] as? String) == "on"
-        updated.bgBright = Self.int(result[5], fallback: updated.bgBright)
-        updated.bgRGB = Self.int(result[6], fallback: updated.bgRGB)
-        updated.bgCt = Self.int(result[7], fallback: updated.bgCt)
-        updated.name = (result[8] as? String) ?? ""
-        state = updated
+        var params: [String: Any] = [:]
+        for (index, property) in coreProps.enumerated() {
+            params[property] = coreResult[index]
+        }
+        state = YeelightStateMapper.applyProps(
+            params,
+            to: state,
+            hasMainPower: &hasMainPowerProperty)
+
+        let backgroundProps = ["bg_power", "bg_bright", "bg_rgb", "bg_ct"]
+        if let backgroundResult = try? await command("get_prop", backgroundProps),
+           backgroundResult.count >= backgroundProps.count {
+            var backgroundParams: [String: Any] = [:]
+            for (index, property) in backgroundProps.enumerated() {
+                backgroundParams[property] = backgroundResult[index]
+            }
+            state = YeelightStateMapper.applyProps(
+                backgroundParams,
+                to: state,
+                hasMainPower: &hasMainPowerProperty)
+        }
+
+        if let mainPowerResult = try? await command("get_prop", ["main_power"]),
+           let mainPower = mainPowerResult.first {
+            state = YeelightStateMapper.applyProps(
+                ["main_power": mainPower],
+                to: state,
+                hasMainPower: &hasMainPowerProperty)
+        }
+        if let supportResult = try? await command("get_prop", ["support"]),
+           let support = supportResult.first {
+            capabilities.update(from: support)
+        }
     }
-
-    // MARK: - State mapping
 
     private func applyProps(_ params: [String: Any]) {
-        var updated = state
-        if let value = Self.string(params["power"]) { updated.power = value == "on" }
-        if let value = Self.intOrNil(params["bright"]) { updated.bright = value }
-        if let value = Self.intOrNil(params["ct"]) { updated.ct = value }
-        if let value = Self.intOrNil(params["color_mode"]) { updated.colorMode = value }
-        if let value = Self.string(params["bg_power"]) { updated.bgPower = value == "on" }
-        if let value = Self.intOrNil(params["bg_bright"]) { updated.bgBright = value }
-        if let value = Self.intOrNil(params["bg_rgb"]) { updated.bgRGB = value }
-        if let value = Self.intOrNil(params["bg_ct"]) { updated.bgCt = value }
-        if let value = Self.string(params["name"]) { updated.name = value }
-        state = updated
-    }
-
-    private static func string(_ value: Any?) -> String? {
-        if let text = value as? String { return text }
-        if let number = value as? NSNumber { return number.stringValue }
-        return nil
-    }
-
-    private static func int(_ value: Any?, fallback: Int) -> Int {
-        return intOrNil(value) ?? fallback
+        state = YeelightStateMapper.applyProps(
+            params,
+            to: state,
+            hasMainPower: &hasMainPowerProperty)
     }
 
     private static func intOrNil(_ value: Any?) -> Int? {
         if let text = value as? String { return Int(text) }
         if let number = value as? NSNumber { return number.intValue }
         return nil
+    }
+
+    private func unsupportedMethod(_ method: String) -> NSError {
+        NSError(
+            domain: "yeelight",
+            code: -7,
+            userInfo: [NSLocalizedDescriptionKey: "设备不支持 \(method)"])
     }
 }

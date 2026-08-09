@@ -1,6 +1,7 @@
 import XCTest
 @testable import YeelightLibraCore
 
+@MainActor
 final class ChromaSessionTests: XCTestCase {
     private var savedDeviceIP: String?
 

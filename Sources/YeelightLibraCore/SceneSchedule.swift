@@ -34,4 +34,21 @@ struct SceneSchedule: Codable, Equatable {
         let nowMinutes = (components.hour ?? 0) * 60 + (components.minute ?? 0)
         return entry.minutesSinceMidnight <= nowMinutes
     }
+
+    /// Returns all due entries in chronological order. Stable ordering is
+    /// important when the app starts after several slots have already passed.
+    func dueEntries(
+        at date: Date,
+        appliedDays: [Int: Date],
+        calendar: Calendar
+    ) -> [SceneScheduleEntry] {
+        entries
+            .filter { isDue($0, at: date, appliedOn: appliedDays[$0.id], calendar: calendar) }
+            .sorted {
+                if $0.minutesSinceMidnight == $1.minutesSinceMidnight {
+                    return $0.id < $1.id
+                }
+                return $0.minutesSinceMidnight < $1.minutesSinceMidnight
+            }
+    }
 }

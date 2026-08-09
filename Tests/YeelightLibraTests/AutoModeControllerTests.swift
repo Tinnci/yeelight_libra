@@ -1,6 +1,7 @@
 import XCTest
 @testable import YeelightLibraCore
 
+@MainActor
 final class AutoModeControllerTests: XCTestCase {
     // MARK: - Cinema flow expression
 
@@ -20,7 +21,7 @@ final class AutoModeControllerTests: XCTestCase {
             let value = Int(parts[2]) ?? -1
             let bright = Int(parts[3]) ?? 0
             XCTAssertGreaterThanOrEqual(duration, 1000, "cinema steps should be slow")
-            XCTAssertTrue([1, 2, 3].contains(mode), "mode \(mode) not in {1,2,3}")
+            XCTAssertTrue([1, 2, 7].contains(mode), "mode \(mode) not in {1,2,7}")
             XCTAssertTrue((0...0xFFFFFF).contains(value), "value \(value) out of RGB range")
             XCTAssertTrue((1...100).contains(bright), "brightness \(bright) out of range")
         }
@@ -48,6 +49,7 @@ final class AutoModeControllerTests: XCTestCase {
     func testRestorePlanKeepsValuesWhenOn() {
         var snapshot = LightState()
         snapshot.power = true
+        snapshot.mainPower = true
         snapshot.bright = 77
         snapshot.ct = 4200
         snapshot.bgPower = true
