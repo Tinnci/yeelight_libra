@@ -5,6 +5,7 @@ import AppKit
 final class DockActions: NSObject {
     var client: YeelightClient?
     var autoController: AutoModeController?
+    var controls: LightControlUseCases?
     var showPanel: (() -> Void)?
 
     func menu() -> NSMenu {
@@ -70,31 +71,24 @@ final class DockActions: NSObject {
 
     @objc private func toggleMain(_ sender: Any?) {
         guard let client else { return }
-        autoController?.userTookMainControl()
-        Task { try? await client.setPower(!client.state.mainPower) }
+        controls?.setMainPower(!client.state.mainPower)
     }
 
     @objc private func toggleBG(_ sender: Any?) {
         guard let client else { return }
-        autoController?.userTookBacklightControl()
-        Task { try? await client.setBGPower(!client.state.bgPower) }
+        controls?.setBacklightPower(!client.state.bgPower)
     }
 
     @objc private func setMainBright(_ sender: NSMenuItem) {
-        guard let client else { return }
-        autoController?.userTookMainControl()
-        Task { try? await client.setBright(sender.tag) }
+        controls?.setMainBrightness(sender.tag)
     }
 
     @objc private func setBGBright(_ sender: NSMenuItem) {
-        guard let client else { return }
-        autoController?.userTookBacklightControl()
-        Task { try? await client.setBGBright(sender.tag) }
+        controls?.setBacklightBrightness(sender.tag)
     }
 
     @objc private func refresh(_ sender: Any?) {
-        guard let client else { return }
-        Task { try? await client.refresh() }
+        controls?.refresh()
     }
 
     @objc private func quitApp(_ sender: Any?) {

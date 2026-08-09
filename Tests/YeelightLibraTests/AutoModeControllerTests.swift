@@ -80,4 +80,105 @@ final class AutoModeControllerTests: XCTestCase {
             targetBright: 50, targetCT: 4050,
             currentBright: 50, currentCT: 4000))
     }
+
+    // MARK: - Automation arbitration
+
+    func testCinemaExcludesAllOtherAutomaticModes() {
+        var policy = AutomationArbitration()
+        _ = policy.apply(.set(.circadian, enabled: true))
+        _ = policy.apply(.set(.screenSync, enabled: true))
+        _ = policy.apply(.set(.wakeUp, enabled: true))
+        let disabled = policy.apply(.set(.cinema, enabled: true))
+
+        XCTAssertEqual(policy.active, [.cinema])
+        XCTAssertEqual(disabled, [.screenSync, .wakeUp])
+    }
+
+    func testManualControlOnlyReleasesModesForItsZone() {
+        var policy = AutomationArbitration()
+        _ = policy.apply(.set(.circadian, enabled: true))
+        _ = policy.apply(.set(.screenSync, enabled: true))
+        let disabled = policy.apply(.manualBacklightControl)
+
+        XCTAssertEqual(policy.active, [.circadian])
+        XCTAssertEqual(disabled, [.screenSync])
+    }
+
+    // MARK: - Workflow plans
+
+    func testSceneWorkflowPreservesZoneOrdering() {
+        let scene = ScenePreset(
+            name: "测试", mainPower: true, mainBright: 40, mainCT: 3500,
+            bgPower: true, bgBright: 20, bgRGB: 0x102030)
+        XCTAssertEqual(
+            LightWorkflowPlan.scene(scene).operations,
+            [.setPower(true), .setBright(40), .setCT(3500),
+             .setBGPower(true), .setBGRGB(0x102030), .setBGBright(20)])
+    }
+
+    func testRestoreWorkflowSkipsValuesForOffZones() {
+        var state = LightState()
+        state.mainPower = false
+        state.bgPower = false
+        XCTAssertEqual(
+            LightWorkflowPlan.restore(state).operations,
+            [.setPower(false), .setBGPower(false)])
+    }
+
+    func testDisplayWakeInvalidatesEarlierSleepGeneration() {
+        var state = DisplayLinkState()
+        let sleep = state.beginSleep()
+        let wake = state.beginWake()
+
+        XCTAssertFalse(state.owns(sleep))
+        XCTAssertTrue(state.owns(wake))
+        XCTAssertFalse(state.sleeping)
+    }
+
+    func testStoppingDisplayLinkInvalidatesPendingWork() {
+        var state = DisplayLinkState()
+        let generation = state.beginSleep()
+        state.stop()
+
+        XCTAssertFalse(state.owns(generation))
+        XCTAssertFalse(state.sleeping)
+    }
+
+    func testWorkflowFailureReportsOperationAndCompletedCount() async {
+        let plan = LightWorkflowPlan(operations: [
+            .setPower(true), .setBright(40), .setCT(3500)
+        ])
+        let expected = NSError(domain: "test", code: 1)
+        do {
+            try await LightWorkflowRunner.run(plan) { operation in
+                if operation == .setBright(40) { throw expected }
+            }
+            XCTFail("expected workflow failure")
+        } catch let failure as LightWorkflowFailure {
+            XCTAssertEqual(failure.operation, .setBright(40))
+            XCTAssertEqual(failure.completedCount, 1)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testWorkflowReportsTheFirstFailedOperationAtEveryPosition() async {
+        let operations: [LightWorkflowOperation] = [.setPower(true), .setBright(40), .setCT(3500)]
+        for failureIndex in operations.indices {
+            let plan = LightWorkflowPlan(operations: operations)
+            do {
+                try await LightWorkflowRunner.run(plan) { operation in
+                    if operation == operations[failureIndex] {
+                        throw NSError(domain: "test", code: failureIndex)
+                    }
+                }
+                XCTFail("expected failure at index \(failureIndex)")
+            } catch let failure as LightWorkflowFailure {
+                XCTAssertEqual(failure.operation, operations[failureIndex])
+                XCTAssertEqual(failure.completedCount, failureIndex)
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+        }
+    }
 }

@@ -10,13 +10,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private let dockActions = DockActions()
     private var statusCancellable: AnyCancellable?
     private var autoController: AutoModeController!
+    private var controls: LightControlUseCases!
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         let host = UserDefaults.standard.string(forKey: "deviceIP") ?? YeelightClient.defaultHost
         client = YeelightClient(host: host)
         autoController = AutoModeController(client: client)
+        controls = LightControlUseCases(client: client, autoController: autoController)
         dockActions.client = client
         dockActions.autoController = autoController
+        dockActions.controls = controls
         dockActions.showPanel = { [weak self] in self?.showPanel() }
         client.start()
         setupStatusItem()
@@ -65,7 +68,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover == nil {
             let pop = NSPopover()
             pop.behavior = .transient
-            let hosting = NSHostingController(rootView: MenuBarPanel(client: client, autoController: autoController))
+            let hosting = NSHostingController(rootView: MenuBarPanel(
+                client: client, autoController: autoController, controls: controls))
             hosting.sizingOptions = []
             hosting.view.frame = NSRect(x: 0, y: 0, width: 360, height: 900)
             pop.contentViewController = hosting

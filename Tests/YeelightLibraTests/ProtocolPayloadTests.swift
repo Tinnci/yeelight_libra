@@ -61,6 +61,22 @@ final class ProtocolPayloadTests: XCTestCase {
         XCTAssertTrue(capabilities.supports("bg_set_rgb"))
         XCTAssertFalse(capabilities.supports("set_segment_rgb"))
     }
+
+    func testTypedRequestDerivesWireMethodAndParameters() {
+        let request = YeelightRequest.setBGPower(false, transition: "sudden", duration: 0)
+        XCTAssertEqual(request.method, "bg_set_power")
+        XCTAssertEqual(request.params as? [AnyHashable], ["off", "sudden", 0])
+
+        let props = YeelightRequest.getProp(["power", "bg_power"])
+        XCTAssertEqual(props.method, "get_prop")
+        XCTAssertEqual(props.params as? [String], ["power", "bg_power"])
+    }
+
+    func testTypedCronRequestClampsInvalidDelay() {
+        let request = YeelightRequest.cronAdd(0)
+        XCTAssertEqual(request.method, "cron_add")
+        XCTAssertEqual(request.params as? [Int], [0, 1])
+    }
 }
 
 @MainActor

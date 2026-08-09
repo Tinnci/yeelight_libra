@@ -21,6 +21,8 @@ macOS 菜单栏应用，用于通过局域网协议控制 Yeelight Libra 屏幕�
 - Dock 菜单：打开控制面板、主灯/背灯开关与亮度快捷项、刷新状态、退出
 - 设备 IP 切换：面板内直接修改，自动持久化（`UserDefaults` 键 `deviceIP`）并重建连接
 
+定时场景在应用启动后若有多个时段已经过去，默认只应用当天最新的已过时段，避免启动时依次闪过历史场景；需要事件回放的调用方可显式选择 replay-all 策略。
+
 ## 环境要求
 
 - macOS 14.0+（Apple Silicon 与 Intel 均可）
@@ -60,6 +62,8 @@ open YeelightLibra.app
 Sources/
   YeelightLibraCore/   # 业务逻辑（网络、状态、UI）
     YeelightClient.swift   # TCP 命令客户端（连接管理、重连、命令超时）
+    YeelightRequest.swift  # 类型化设备请求词汇（协议字符串仅在此处映射）
+    YeelightTransport.swift # 类型化请求与具体网络传输之间的 seam
     ChromaSession.swift    # UDP Chroma 通道（token 会话、保活、重连）
     ProtocolSupport.swift   # 协议编码、能力发现、状态映射、流光表达式
     LightState.swift       # 设备状态镜像
@@ -68,6 +72,12 @@ Sources/
     SunriseWakeUp.swift    # 日出唤醒时刻表（窗口 / 进度 / 目标插值）
     SceneSchedule.swift    # 定时场景计划（按时应用场景预设）
     AutoModeController.swift # 智能模式（影院 / 昼夜节律 / 屏幕同步 / 日出唤醒 / 定时场景 / 显示器联动）
+    AutomationArbitration.swift # 自动模式冲突策略（纯 reducer）
+    AutomationDependencies.swift # 持久化、时钟、取色、显示事件适配器
+    DisplayLinkState.swift # 显示器联动代次状态
+    LightWorkflow.swift # 场景/恢复类型化工作流与部分失败结果
+    LightControlUseCases.swift # 面板与 Dock 共用的人工控制入口与错误状态
+    ScreenSyncDelivery.swift # 屏幕同步迟滞、限流与最新值合并
     ScreenColorSampler.swift  # 屏幕取色（边缘主色提取 + 截屏采样）
     MenuBarPanel.swift     # 菜单栏面板（含 AppKit NSSlider 封装）
     DockActions.swift      # Dock 菜单

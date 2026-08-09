@@ -107,4 +107,65 @@ final class ScreenSyncTests: XCTestCase {
         XCTAssertTrue(ScreenColorSampler.shouldSend(
             current: RGB(100, 100, 100), next: RGB(110, 100, 100)))
     }
+
+    // MARK: - delivery coalescing
+
+    func testTCPThrottleKeepsLatestPendingColor() {
+        var delivery = ScreenSyncDelivery(tcpInterval: 0.5)
+        let t0 = Date(timeIntervalSince1970: 100)
+        let first = RGB(100, 20, 20)
+        let latest = RGB(20, 100, 20)
+
+        XCTAssertEqual(delivery.offer(first, now: t0, chromaAvailable: false), .tcp(first))
+        XCTAssertNil(delivery.offer(latest, now: t0.addingTimeInterval(0.1), chromaAvailable: false))
+        XCTAssertTrue(delivery.hasPendingTCP)
+
+        XCTAssertEqual(
+            delivery.finishTCP(succeeded: true, now: t0.addingTimeInterval(0.6), chromaAvailable: false),
+            .tcp(latest))
+    }
+
+    func testCompletionBeforeThrottleWindowSchedulesPendingFlush() {
+        var delivery = ScreenSyncDelivery(tcpInterval: 0.5)
+        let t0 = Date(timeIntervalSince1970: 100)
+        let first = RGB(100, 20, 20)
+        let latest = RGB(20, 100, 20)
+
+        XCTAssertEqual(delivery.offer(first, now: t0, chromaAvailable: false), .tcp(first))
+        XCTAssertNil(delivery.offer(latest, now: t0.addingTimeInterval(0.1), chromaAvailable: false))
+        XCTAssertNil(delivery.finishTCP(succeeded: true, now: t0.addingTimeInterval(0.2), chromaAvailable: false))
+        XCTAssertEqual(
+            delivery.flush(now: t0.addingTimeInterval(0.5), chromaAvailable: false),
+            .tcp(latest))
+    }
+
+    func testStableColorIsNotRepeatedAfterTCPStarts() {
+        var delivery = ScreenSyncDelivery(tcpInterval: 0)
+        let color = RGB(100, 20, 20)
+        let now = Date(timeIntervalSince1970: 100)
+
+        XCTAssertEqual(delivery.offer(color, now: now, chromaAvailable: false), .tcp(color))
+        XCTAssertNil(delivery.offer(color, now: now.addingTimeInterval(1), chromaAvailable: false))
+    }
+
+    func testFailedTCPSendIsRequeued() {
+        var delivery = ScreenSyncDelivery(tcpInterval: 0)
+        let color = RGB(100, 20, 20)
+        let now = Date(timeIntervalSince1970: 100)
+
+        XCTAssertEqual(delivery.offer(color, now: now, chromaAvailable: false), .tcp(color))
+        XCTAssertEqual(
+            delivery.finishTCP(succeeded: false, now: now.addingTimeInterval(1), chromaAvailable: false),
+            .tcp(color))
+    }
+
+    func testChromaTakesPriorityOverTCPAndMarksColorDelivered() {
+        var delivery = ScreenSyncDelivery(tcpInterval: 0.5)
+        let color = RGB(10, 20, 30)
+        let now = Date(timeIntervalSince1970: 100)
+
+        XCTAssertEqual(delivery.offer(color, now: now, chromaAvailable: true), .chroma(color))
+        XCTAssertNil(delivery.offer(color, now: now.addingTimeInterval(1), chromaAvailable: true))
+        XCTAssertEqual(delivery.lastDelivered, color)
+    }
 }

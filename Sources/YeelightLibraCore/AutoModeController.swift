@@ -65,7 +65,7 @@ final class AutoModeController: ObservableObject {
 
     @Published var displayLinkEnabled = false {
         didSet {
-            UserDefaults.standard.set(displayLinkEnabled, forKey: Self.displayLinkKey)
+            store.set(displayLinkEnabled, forKey: Self.displayLinkKey)
             handleDisplayLinkChange()
         }
     }
@@ -75,12 +75,14 @@ final class AutoModeController: ObservableObject {
     private weak var client: YeelightClient?
     private var circadianTask: Task<Void, Never>?
     private var cinemaSnapshot: LightState?
-    private let screenSampler = ScreenColorSampler()
+    private let screenSampler: any ScreenSampling
+    private let store: any AutomationStore
+    private let clock: any AutomationClock
+    private let displayEvents: any DisplayEventSource
     private var screenSyncTask: Task<Void, Never>?
     private var screenSnapshot: LightState?
-    private var lastSentColor: RGB?
-    private var tcpSendInFlight = false
-    private var lastTCPSendTime = Date.distantPast
+    private var screenDelivery = ScreenSyncDelivery()
+    private var screenFlushTask: Task<Void, Never>?
     private var unchangedCount = 0
     private var cinemaGeneration = 0
     private var screenSyncGeneration = 0
@@ -88,6 +90,7 @@ final class AutoModeController: ObservableObject {
     private var wakeUpGeneration = 0
     private var suppressCinemaRestore = false
     private var suppressScreenSyncRestore = false
+    private var automationArbitration = AutomationArbitration()
 
     private var wakeUpConfig = SunriseWakeUp()
     private var wakeUpTask: Task<Void, Never>?
@@ -100,6 +103,8 @@ final class AutoModeController: ObservableObject {
     private var displaySleepCancellable: AnyCancellable?
     private var displayWakeCancellable: AnyCancellable?
     private var displaySnapshot: LightState?
+    private var displayTask: Task<Void, Never>?
+    private var displayState = DisplayLinkState()
 
     // MARK: - Persistence keys
 
@@ -110,29 +115,38 @@ final class AutoModeController: ObservableObject {
     private static let sceneScheduleAppliedDaysKey = "sceneScheduleAppliedDays"
     private static let displayLinkKey = "displayLinkEnabled"
 
-    init(client: YeelightClient) {
+    init(
+        client: YeelightClient,
+        store: any AutomationStore = UserDefaultsAutomationStore(),
+        clock: any AutomationClock = SystemAutomationClock(),
+        screenSampler: any ScreenSampling = ScreenColorSampler(),
+        displayEvents: any DisplayEventSource = WorkspaceDisplayEventSource()
+    ) {
         self.client = client
-        let defaults = UserDefaults.standard
-        let calendar = Calendar.current
-        let hour = defaults.object(forKey: Self.wakeUpAlarmHourKey) as? Int ?? 7
-        let minute = defaults.object(forKey: Self.wakeUpAlarmMinuteKey) as? Int ?? 0
-        let ramp = defaults.object(forKey: Self.wakeUpRampKey) as? Int ?? 30
-        let now = Date()
+        self.store = store
+        self.clock = clock
+        self.screenSampler = screenSampler
+        self.displayEvents = displayEvents
+        let calendar = clock.calendar
+        let hour = store.int(forKey: Self.wakeUpAlarmHourKey) ?? 7
+        let minute = store.int(forKey: Self.wakeUpAlarmMinuteKey) ?? 0
+        let ramp = store.int(forKey: Self.wakeUpRampKey) ?? 30
+        let now = clock.now
         let base = calendar.startOfDay(for: now)
         wakeUpAlarmDate = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: base) ?? now
         wakeUpRampMinutes = ramp
         wakeUpConfig = SunriseWakeUp(alarmHour: hour, alarmMinute: minute, rampMinutes: ramp)
-        if let data = defaults.data(forKey: Self.sceneScheduleKey),
+        if let data = store.data(forKey: Self.sceneScheduleKey),
            let decoded = try? JSONDecoder().decode(SceneSchedule.self, from: data) {
             sceneSchedule = decoded
         } else {
             sceneSchedule = .defaultSchedule()
         }
-        if let data = defaults.data(forKey: Self.sceneScheduleAppliedDaysKey),
+        if let data = store.data(forKey: Self.sceneScheduleAppliedDaysKey),
            let decoded = try? JSONDecoder().decode([Int: Date].self, from: data) {
             scheduleAppliedDays = decoded
         }
-        displayLinkEnabled = defaults.bool(forKey: Self.displayLinkKey)
+        displayLinkEnabled = store.bool(forKey: Self.displayLinkKey)
         startScheduleLoop()
         if displayLinkEnabled {
             handleDisplayLinkChange()
@@ -154,29 +168,24 @@ final class AutoModeController: ObservableObject {
 
     private func handleCinemaChange() {
         guard let client else { return }
+        applyAutomationIntent(.set(.cinema, enabled: cinemaEnabled))
         cinemaGeneration += 1
         let generation = cinemaGeneration
         if cinemaEnabled {
-            disableScreenSyncForConflict()
-            if circadianEnabled { circadianEnabled = false }
-            if wakeUpEnabled { wakeUpEnabled = false }
             cinemaSnapshot = client.state
             Task { @MainActor [weak self, weak client] in
                 guard let self, let client,
                       self.cinemaEnabled,
                       self.cinemaGeneration == generation else { return }
                 do {
-                    try await client.setPower(true)
-                    guard self.cinemaEnabled, self.cinemaGeneration == generation else { return }
-                    try await client.setBright(Self.cinemaMainBright)
-                    guard self.cinemaEnabled, self.cinemaGeneration == generation else { return }
-                    try await client.setCT(Self.cinemaMainCT)
-                    guard self.cinemaEnabled, self.cinemaGeneration == generation else { return }
-                    try await client.setBGPower(true)
-                    guard self.cinemaEnabled, self.cinemaGeneration == generation else { return }
-                    try await client.setBGBright(30)
-                    guard self.cinemaEnabled, self.cinemaGeneration == generation else { return }
-                    try await client.startBGColorFlow(Self.cinemaFlowExpression)
+                    try await client.apply(LightWorkflowPlan(operations: [
+                        .setPower(true),
+                        .setBright(Self.cinemaMainBright),
+                        .setCT(Self.cinemaMainCT),
+                        .setBGPower(true),
+                        .setBGBright(30),
+                        .startBGFlow(Self.cinemaFlowExpression),
+                    ]))
                 } catch {
                     Logger.log("cinema enable failed: \(error)")
                 }
@@ -194,7 +203,7 @@ final class AutoModeController: ObservableObject {
                     guard self.cinemaGeneration == generation,
                           !self.cinemaEnabled else { return }
                     if shouldRestore, let snapshot {
-                        try await self.restore(snapshot, client: client)
+                        try await client.apply(LightWorkflowPlan.restore(snapshot))
                     }
                 } catch {
                     Logger.log("cinema disable failed: \(error)")
@@ -216,34 +225,33 @@ final class AutoModeController: ObservableObject {
     }
 
     private func restore(_ snapshot: LightState, client: YeelightClient) async throws {
-        let plan = Self.restorePlan(for: snapshot)
-        try await client.setPower(plan.mainPower)
-        if let bright = plan.mainBright { try await client.setBright(bright) }
-        if let ct = plan.mainCT { try await client.setCT(ct) }
-        try await client.setBGPower(plan.bgPower)
-        if let bright = plan.bgBright { try await client.setBGBright(bright) }
-        if let rgb = plan.bgRGB { try await client.setBGRGB(rgb) }
+        try await client.apply(LightWorkflowPlan.restore(snapshot))
     }
 
     private func restoreBacklight(_ snapshot: LightState, client: YeelightClient) async throws {
-        let plan = Self.restorePlan(for: snapshot)
-        try await client.setBGPower(plan.bgPower)
-        if let bright = plan.bgBright { try await client.setBGBright(bright) }
-        if let rgb = plan.bgRGB { try await client.setBGRGB(rgb) }
+        try await client.apply(LightWorkflowPlan.restoreBacklight(snapshot))
     }
 
-    private func disableCinemaForConflict() {
-        guard cinemaEnabled else { return }
-        suppressCinemaRestore = true
-        cinemaEnabled = false
-        suppressCinemaRestore = false
-    }
-
-    private func disableScreenSyncForConflict() {
-        guard screenSyncEnabled else { return }
-        suppressScreenSyncRestore = true
-        screenSyncEnabled = false
-        suppressScreenSyncRestore = false
+    private func applyAutomationIntent(_ intent: AutomationIntent) {
+        let disabled = automationArbitration.apply(intent)
+        for mode in disabled {
+            switch mode {
+            case .cinema where cinemaEnabled:
+                suppressCinemaRestore = true
+                cinemaEnabled = false
+                suppressCinemaRestore = false
+            case .screenSync where screenSyncEnabled:
+                suppressScreenSyncRestore = true
+                screenSyncEnabled = false
+                suppressScreenSyncRestore = false
+            case .circadian where circadianEnabled:
+                circadianEnabled = false
+            case .wakeUp where wakeUpEnabled:
+                wakeUpEnabled = false
+            default:
+                break
+            }
+        }
     }
 
     // MARK: - Circadian mode
@@ -251,10 +259,9 @@ final class AutoModeController: ObservableObject {
     static let circadianIntervalNanos: UInt64 = 5 * 60 * 1_000_000_000
 
     private func handleCircadianChange() {
+        applyAutomationIntent(.set(.circadian, enabled: circadianEnabled))
         circadianGeneration += 1
         if circadianEnabled {
-            disableCinemaForConflict()
-            if wakeUpEnabled { wakeUpEnabled = false }
             startCircadian()
         } else {
             circadianTask?.cancel()
@@ -269,7 +276,7 @@ final class AutoModeController: ObservableObject {
         circadianTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 await self?.evaluateCircadian(generation: generation)
-                try? await Task.sleep(nanoseconds: Self.circadianIntervalNanos)
+                try? await self?.clock.sleep(nanoseconds: Self.circadianIntervalNanos)
             }
         }
     }
@@ -286,7 +293,7 @@ final class AutoModeController: ObservableObject {
     @MainActor
     private func evaluateCircadian(generation: Int) async {
         guard let client, circadianEnabled, circadianGeneration == generation else { return }
-        let target = schedule.target(at: Date())
+        let target = schedule.target(at: clock.now)
         let text = "当前 \(target.ct)K · 亮度 \(target.bright)"
         if circadianTargetText != text {
             circadianTargetText = text
@@ -310,10 +317,10 @@ final class AutoModeController: ObservableObject {
 
     private func handleScreenSyncChange() {
         guard let client else { return }
+        applyAutomationIntent(.set(.screenSync, enabled: screenSyncEnabled))
         screenSyncGeneration += 1
         let generation = screenSyncGeneration
         if screenSyncEnabled {
-            disableCinemaForConflict()
             screenSnapshot = client.state
             if !client.state.bgPower {
                 Task { @MainActor [weak self, weak client] in
@@ -329,9 +336,10 @@ final class AutoModeController: ObservableObject {
         } else {
             screenSyncTask?.cancel()
             screenSyncTask = nil
-            lastSentColor = nil
+            screenDelivery.reset()
+            screenFlushTask?.cancel()
+            screenFlushTask = nil
             unchangedCount = 0
-            tcpSendInFlight = false
             screenSyncColor = nil
             screenSyncStatusText = ""
             let snapshot = screenSnapshot
@@ -369,60 +377,100 @@ final class AutoModeController: ObservableObject {
                   self.screenSyncGeneration == generation {
                 if let rgb = await self.screenSampler.sampleDisplay() {
                     self.screenSyncColor = rgb
-                    if ScreenColorSampler.shouldSend(current: self.lastSentColor, next: rgb) {
-                        self.sendScreenColor(rgb, generation: generation)
-                        self.lastSentColor = rgb
+                    if let send = self.screenDelivery.offer(
+                        rgb,
+                        now: self.clock.now,
+                        chromaAvailable: self.client?.chroma.isRunning == true
+                            && self.client?.chromaConnected == true
+                    ) {
+                        self.sendScreenColor(send, generation: generation)
                         self.unchangedCount = 0
                     } else {
+                        self.scheduleScreenFlush(generation: generation)
                         self.unchangedCount += 1
                     }
                 } else {
                     self.unchangedCount += 1
                 }
                 let interval: UInt64 = self.unchangedCount >= 10 ? 1_000_000_000 : 200_000_000
-                try? await Task.sleep(nanoseconds: interval)
+                try? await self.clock.sleep(nanoseconds: interval)
             }
         }
     }
 
-    private func sendScreenColor(_ rgb: RGB, generation: Int) {
+    private func sendScreenColor(_ send: ScreenSyncSend, generation: Int) {
         guard let client else { return }
         guard screenSyncEnabled, screenSyncGeneration == generation else { return }
         guard client.state.bgPower else {
+            screenDelivery.reset()
             screenSyncStatusText = "背灯已关闭"
             return
         }
-        let value = (rgb.r << 16) | (rgb.g << 8) | rgb.b
-        if client.chroma.isRunning && client.chromaConnected {
+        switch send {
+        case .chroma(let rgb):
+            let value = (rgb.r << 16) | (rgb.g << 8) | rgb.b
             client.chroma.bgSetRGB(value)
             screenSyncStatusText = String(format: "同步中 #%06X", value)
-        } else {
-            let now = Date()
-            guard !tcpSendInFlight, now.timeIntervalSince(lastTCPSendTime) >= 0.5 else { return }
-            tcpSendInFlight = true
-            lastTCPSendTime = now
-            Task { [weak self, weak client] in
-                defer { self?.tcpSendInFlight = false }
-                try? await client?.setBGRGB(value)
+        case .tcp(let rgb):
+            let value = (rgb.r << 16) | (rgb.g << 8) | rgb.b
+            Task { @MainActor [weak self, weak client] in
+                let succeeded: Bool
+                do {
+                    try await client?.setBGRGB(value)
+                    succeeded = client != nil
+                } catch {
+                    succeeded = false
+                    Logger.log("screen sync TCP send failed: \(error)")
+                }
+                guard let self, self.screenSyncEnabled,
+                      self.screenSyncGeneration == generation else { return }
+                let chromaAvailable = client?.chroma.isRunning == true
+                    && client?.chromaConnected == true
+                if let next = self.screenDelivery.finishTCP(
+                    succeeded: succeeded,
+                    now: self.clock.now,
+                    chromaAvailable: chromaAvailable
+                ) {
+                    self.sendScreenColor(next, generation: generation)
+                } else {
+                    self.scheduleScreenFlush(generation: generation)
+                }
             }
             screenSyncStatusText = String(format: "同步中 #%06X", value)
+        }
+    }
+
+    private func scheduleScreenFlush(generation: Int) {
+        guard screenSyncEnabled, screenSyncGeneration == generation,
+              let delay = screenDelivery.tcpDelay(now: clock.now) else { return }
+        screenFlushTask?.cancel()
+        screenFlushTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await self.clock.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, self.screenSyncEnabled,
+                  self.screenSyncGeneration == generation else { return }
+            let chromaAvailable = self.client?.chroma.isRunning == true
+                && self.client?.chromaConnected == true
+            if let next = self.screenDelivery.flush(
+                now: self.clock.now,
+                chromaAvailable: chromaAvailable
+            ) {
+                self.sendScreenColor(next, generation: generation)
+            }
         }
     }
 
     /// Any manual backlight action (color pick, scene, bg power) hands control
     /// back to the user and tears down the automatic backlight modes.
     func userTookBacklightControl() {
-        disableScreenSyncForConflict()
-        disableCinemaForConflict()
+        applyAutomationIntent(.manualBacklightControl)
     }
 
     /// Any manual main-light action hands control back from all main-light
     /// automations. Disabling through the conflict path prevents an old async
     /// restore from overwriting the user's new value.
     func userTookMainControl() {
-        disableCinemaForConflict()
-        if circadianEnabled { circadianEnabled = false }
-        if wakeUpEnabled { wakeUpEnabled = false }
+        applyAutomationIntent(.manualMainControl)
     }
 
     // MARK: - Sunrise wake-up
@@ -437,10 +485,9 @@ final class AutoModeController: ObservableObject {
     }()
 
     private func handleWakeUpChange() {
+        applyAutomationIntent(.set(.wakeUp, enabled: wakeUpEnabled))
         wakeUpGeneration += 1
         if wakeUpEnabled {
-            disableCinemaForConflict()
-            if circadianEnabled { circadianEnabled = false }
             startWakeUp()
         } else {
             wakeUpTask?.cancel()
@@ -458,7 +505,7 @@ final class AutoModeController: ObservableObject {
         wakeUpTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 await self?.evaluateWakeUp(generation: generation)
-                try? await Task.sleep(nanoseconds: Self.wakeUpTickNanos)
+                try? await self?.clock.sleep(nanoseconds: Self.wakeUpTickNanos)
             }
         }
     }
@@ -466,8 +513,8 @@ final class AutoModeController: ObservableObject {
     @MainActor
     private func evaluateWakeUp(generation: Int) async {
         guard let client, wakeUpEnabled, wakeUpGeneration == generation else { return }
-        let now = Date()
-        let calendar = Calendar.current
+        let now = clock.now
+        let calendar = clock.calendar
         let occurrence = wakeUpConfig.nextOccurrence(after: now, calendar: calendar)
         switch occurrence.phase {
         case .awaiting:
@@ -479,7 +526,7 @@ final class AutoModeController: ObservableObject {
             if wakeUpProgress != nil { wakeUpProgress = nil }
             let start = wakeUpConfig.windowStart(on: occurrence.day, calendar: calendar)
             let delay = min(max(start.timeIntervalSince(now), 1), 60)
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            try? await clock.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         case .ramping:
             let day = calendar.startOfDay(for: occurrence.day)
             if lastWakeUpWindowDay != day {
@@ -513,9 +560,9 @@ final class AutoModeController: ObservableObject {
             guard abs(target.bright - client.state.bright) >= 1 ||
                   abs(target.ct - client.state.ct) >= 10 else { return }
             do {
-                try await client.setBright(target.bright)
-                guard wakeUpEnabled, wakeUpGeneration == generation else { return }
-                try await client.setCT(target.ct)
+                try await client.apply(LightWorkflowPlan(operations: [
+                    .setBright(target.bright), .setCT(target.ct)
+                ]))
             } catch {
                 Logger.log("wake-up apply failed: \(error)")
             }
@@ -523,21 +570,21 @@ final class AutoModeController: ObservableObject {
     }
 
     private func persistWakeUpTime() {
-        let calendar = Calendar.current
-        UserDefaults.standard.set(
+        let calendar = clock.calendar
+        store.set(
             calendar.component(.hour, from: wakeUpAlarmDate),
             forKey: Self.wakeUpAlarmHourKey)
-        UserDefaults.standard.set(
+        store.set(
             calendar.component(.minute, from: wakeUpAlarmDate),
             forKey: Self.wakeUpAlarmMinuteKey)
     }
 
     private func persistWakeUpRamp() {
-        UserDefaults.standard.set(wakeUpRampMinutes, forKey: Self.wakeUpRampKey)
+        store.set(wakeUpRampMinutes, forKey: Self.wakeUpRampKey)
     }
 
     private func syncWakeUpConfig() {
-        let calendar = Calendar.current
+        let calendar = clock.calendar
         wakeUpConfig.alarmHour = calendar.component(.hour, from: wakeUpAlarmDate)
         wakeUpConfig.alarmMinute = calendar.component(.minute, from: wakeUpAlarmDate)
         wakeUpConfig.rampMinutes = wakeUpRampMinutes
@@ -552,7 +599,7 @@ final class AutoModeController: ObservableObject {
         scheduleTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 await self?.evaluateSceneSchedule()
-                try? await Task.sleep(nanoseconds: Self.scheduleTickNanos)
+                try? await self?.clock.sleep(nanoseconds: Self.scheduleTickNanos)
             }
         }
     }
@@ -562,8 +609,8 @@ final class AutoModeController: ObservableObject {
     @MainActor
     private func evaluateSceneSchedule() async {
         guard let client else { return }
-        let now = Date()
-        let calendar = Calendar.current
+        let now = clock.now
+        let calendar = clock.calendar
         let stale = scheduleAppliedDays.filter { !calendar.isDate($0.value, inSameDayAs: now) }
         for key in stale.keys {
             scheduleAppliedDays.removeValue(forKey: key)
@@ -572,17 +619,23 @@ final class AutoModeController: ObservableObject {
             persistSceneScheduleAppliedDays()
         }
         for entry in sceneSchedule.dueEntries(
-            at: now, appliedDays: scheduleAppliedDays, calendar: calendar
+            at: now,
+            appliedDays: scheduleAppliedDays,
+            calendar: calendar,
+            policy: .latestOnly
         ) {
             guard let scene = ScenePreset.all.first(where: { $0.name == entry.sceneName }) else { continue }
-            if circadianEnabled { circadianEnabled = false }
-            if wakeUpEnabled { wakeUpEnabled = false }
+            applyAutomationIntent(.manualMainControl)
             userTookBacklightControl()
             do {
                 try await client.applyScene(scene)
                 scheduleAppliedDays[entry.id] = calendar.startOfDay(for: now)
                 persistSceneScheduleAppliedDays()
             } catch {
+                // A workflow can have applied a prefix before failing. Refresh
+                // before the next scheduled retry so the retry reconciles with
+                // device state instead of assuming the old mirror is exact.
+                try? await client.refresh()
                 Logger.log("scheduled scene apply failed: \(error)")
             }
         }
@@ -590,28 +643,25 @@ final class AutoModeController: ObservableObject {
 
     private func persistSceneSchedule() {
         if let data = try? JSONEncoder().encode(sceneSchedule) {
-            UserDefaults.standard.set(data, forKey: Self.sceneScheduleKey)
+            store.set(data, forKey: Self.sceneScheduleKey)
         }
     }
 
     private func persistSceneScheduleAppliedDays() {
         if let data = try? JSONEncoder().encode(scheduleAppliedDays) {
-            UserDefaults.standard.set(data, forKey: Self.sceneScheduleAppliedDaysKey)
+            store.set(data, forKey: Self.sceneScheduleAppliedDaysKey)
         }
     }
 
     // MARK: - Display sleep/wake linkage
 
     private func handleDisplayLinkChange() {
-        let center = NSWorkspace.shared.notificationCenter
         if displayLinkEnabled {
-            displaySleepCancellable = center
-                .publisher(for: NSWorkspace.screensDidSleepNotification)
+            displaySleepCancellable = displayEvents.screensDidSleep
                 .sink { [weak self] _ in
                     Task { @MainActor in self?.displayDidSleep() }
                 }
-            displayWakeCancellable = center
-                .publisher(for: NSWorkspace.screensDidWakeNotification)
+            displayWakeCancellable = displayEvents.screensDidWake
                 .sink { [weak self] _ in
                     Task { @MainActor in self?.displayDidWake() }
                 }
@@ -628,12 +678,20 @@ final class AutoModeController: ObservableObject {
     private func displayDidSleep() {
         guard let client else { return }
         guard client.state.mainPower || client.state.bgPower else { return }
+        let generation = displayState.beginSleep()
+        let previous = displayTask
         displaySnapshot = client.state
-        Task { [weak client] in
-            guard let client else { return }
+        displayTask = Task { @MainActor [weak self, weak client] in
+            // Serialize display transitions. Cancellation of a Swift Task does
+            // not cancel an already-written network request, so a generation
+            // check alone is insufficient; the next transition waits for the
+            // previous one to finish before restoring state.
+            await previous?.value
+            guard let self, let client, self.displayState.owns(generation) else { return }
             do {
-                try await client.setPower(false)
-                try await client.setBGPower(false)
+                try await client.apply(LightWorkflowPlan(operations: [
+                    .setPower(false), .setBGPower(false)
+                ]))
             } catch {
                 Logger.log("display sleep off failed: \(error)")
             }
@@ -644,9 +702,13 @@ final class AutoModeController: ObservableObject {
     private func displayDidWake() {
         let snapshot = displaySnapshot
         displaySnapshot = nil
+        let generation = displayState.beginWake()
+        let previous = displayTask
         guard let snapshot, let client else { return }
-        Task { [weak self, weak client] in
+        displayTask = Task { @MainActor [weak self, weak client] in
             guard let self, let client else { return }
+            await previous?.value
+            guard self.displayState.owns(generation) else { return }
             do {
                 try await self.restore(snapshot, client: client)
             } catch {
@@ -658,6 +720,10 @@ final class AutoModeController: ObservableObject {
     // MARK: - Lifecycle
 
     func stop() {
+        displayState.stop()
+        displayTask?.cancel()
+        displayTask = nil
+        displaySnapshot = nil
         circadianTask?.cancel()
         circadianTask = nil
         screenSyncTask?.cancel()

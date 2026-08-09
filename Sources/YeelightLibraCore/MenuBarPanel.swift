@@ -53,13 +53,18 @@ struct NativeSlider: NSViewRepresentable {
 struct MenuBarPanel: View {
     @ObservedObject var client: YeelightClient
     @ObservedObject var autoController: AutoModeController
+    @ObservedObject var controls: LightControlUseCases
 
     @State private var bright: Double = 10
     @State private var ct: Double = 3200
     @State private var bgBright: Double = 50
     @State private var bgColor: Color = Color(red: 0.8, green: 0.4, blue: 0.5)
     @State private var ipText = YeelightClient.defaultHost
-    @State private var debounce: DispatchWorkItem?
+    @State private var mainBrightDebounce: DispatchWorkItem?
+    @State private var ctDebounce: DispatchWorkItem?
+    @State private var bgBrightDebounce: DispatchWorkItem?
+    @State private var colorDebounce: DispatchWorkItem?
+    @State private var segmentDebounce: DispatchWorkItem?
     @State private var cronOption = 0
     @State private var segLeft: Color = .orange
     @State private var segRight: Color = .blue
@@ -73,13 +78,11 @@ struct MenuBarPanel: View {
             sectionTitle("主灯")
             Toggle(isOn: powerBinding(\.mainPower)) { Text("电源") }
                 .toggleStyle(.switch)
-            sliderRow("亮度", value: $bright, range: 1...100) { value in
-                autoController.userTookMainControl()
-                Task { try? await client.setBright(Int(value)) }
+            sliderRow("亮度", value: $bright, range: 1...100, schedule: debouncedMain) { value in
+                controls.setMainBrightness(Int(value))
             }
-            sliderRow("色温", value: $ct, range: 2700...6500) { value in
-                autoController.userTookMainControl()
-                Task { try? await client.setCT(Int(value)) }
+            sliderRow("色温", value: $ct, range: 2700...6500, schedule: debouncedCT) { value in
+                controls.setMainCT(Int(value))
             }
 
             Divider()
@@ -87,22 +90,19 @@ struct MenuBarPanel: View {
             sectionTitle("背灯")
             Toggle(isOn: powerBinding(\.bgPower)) { Text("电源") }
                 .toggleStyle(.switch)
-            sliderRow("亮度", value: $bgBright, range: 1...100) { value in
-                autoController.userTookBacklightControl()
-                Task { try? await client.setBGBright(Int(value)) }
+            sliderRow("亮度", value: $bgBright, range: 1...100, schedule: debouncedBG) { value in
+                controls.setBacklightBrightness(Int(value))
             }
             HStack {
                 ColorPicker("颜色", selection: $bgColor, supportsOpacity: false)
                     .onChange(of: bgColor) { _, newColor in
                         let rgb = Self.rgbInt(from: newColor)
                         guard rgb != client.state.bgRGB else { return }
-                        autoController.userTookBacklightControl()
-                        debounced { sendBGColor(rgb) }
+                        debouncedColor { sendBGColor(rgb) }
                     }
                 Spacer()
                 Button("恢复") {
-                    autoController.userTookBacklightControl()
-                    debounced { sendBGColor(LightState().bgRGB) }
+                    debouncedColor { sendBGColor(LightState().bgRGB) }
                 }
                 .controlSize(.small)
             }
@@ -112,9 +112,7 @@ struct MenuBarPanel: View {
             HStack {
                 ForEach(ScenePreset.all) { scene in
                     Button(scene.name) {
-                        autoController.userTookBacklightControl()
-                        autoController.userTookMainControl()
-                        Task { try? await client.applyScene(scene) }
+                        controls.applyScene(scene)
                     }
                 }
                 Spacer()
@@ -198,9 +196,9 @@ struct MenuBarPanel: View {
             .onChange(of: cronOption) { _, newValue in
                 guard client.state.mainPower else { cronOption = 0; return }
                 if newValue == 0 {
-                    Task { try? await client.cancelCronOff() }
+                    controls.cancelCronOff()
                 } else {
-                    Task { try? await client.setCronOff(afterMinutes: newValue) }
+                    controls.setCronOff(afterMinutes: newValue)
                 }
             }
             HStack {
@@ -209,8 +207,7 @@ struct MenuBarPanel: View {
                 Button("彩虹") { startFlow(.rainbow) }
                 Button("极光") { startFlow(.aurora) }
                 Button("停止") {
-                    autoController.userTookBacklightControl()
-                    Task { try? await client.stopBGColorFlow() }
+                    controls.stopBacklightFlow()
                 }
                 Spacer()
             }
@@ -223,19 +220,16 @@ struct MenuBarPanel: View {
             HStack {
                 ColorPicker("左", selection: $segLeft, supportsOpacity: false)
                     .onChange(of: segLeft) { _, c in
-                        autoController.userTookBacklightControl()
-                        debounced { sendSegment(0, 0, c) }
+                        debouncedSegment { sendSegment(0, 0, c) }
                     }
                 ColorPicker("右", selection: $segRight, supportsOpacity: false)
                     .onChange(of: segRight) { _, c in
-                        autoController.userTookBacklightControl()
-                        debounced { sendSegment(1, 1, c) }
+                        debouncedSegment { sendSegment(1, 1, c) }
                     }
                 Spacer()
                 Button("整条") {
-                    autoController.userTookBacklightControl()
                     let c = segLeft
-                    debounced { sendSegment(0, 255, c) }
+                    debouncedSegment { sendSegment(0, 255, c) }
                 }
                 .controlSize(.small)
             }
@@ -296,22 +290,21 @@ struct MenuBarPanel: View {
     }
 
     private func startFlow(_ preset: FlowPreset) {
-        autoController.userTookBacklightControl()
         let expression = preset.expression
-        Task { try? await client.startBGColorFlow(expression) }
+            controls.startBacklightFlow(expression)
     }
 
     private func sendBGColor(_ rgb: Int) {
         if chromaEnabled && client.chromaConnected {
             client.chroma.bgSetRGB(rgb)
         } else {
-            Task { try? await client.setBGRGB(rgb) }
+            controls.setBacklightColor(rgb)
         }
     }
 
     private func sendSegment(_ start: Int, _ end: Int, _ color: Color) {
         let rgb = Self.rgbInt(from: color)
-        Task { try? await client.setSegmentRGB(start: start, end: end, rgb: rgb) }
+        controls.setSegment(start: start, end: end, rgb: rgb)
     }
 
     // MARK: - Header
@@ -326,7 +319,7 @@ struct MenuBarPanel: View {
                     .font(.headline)
                 Spacer()
                 Button("刷新") {
-                    Task { try? await client.refresh() }
+                    controls.refresh()
                 }
                 .controlSize(.small)
             }
@@ -346,13 +339,20 @@ struct MenuBarPanel: View {
     // MARK: - Footer
 
     private var footer: some View {
-        HStack {
-            Text("主灯 \(client.state.mainStatusText) · 背灯 \(client.state.bgStatusText)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button("退出") { NSApp.terminate(nil) }
-                .controlSize(.small)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("主灯 \(client.state.mainStatusText) · 背灯 \(client.state.bgStatusText)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("退出") { NSApp.terminate(nil) }
+                    .controlSize(.small)
+            }
+            if let error = controls.lastError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         }
     }
 
@@ -425,12 +425,13 @@ struct MenuBarPanel: View {
         _ label: String,
         value: Binding<Double>,
         range: ClosedRange<Double>,
+        schedule: @escaping (@escaping () -> Void) -> Void,
         send: @escaping (Double) -> Void
     ) -> some View {
         HStack {
             Text(label).frame(width: 34, alignment: .leading)
             NativeSlider(value: value, range: range) { newValue in
-                debounced { send(newValue) }
+                schedule { send(newValue) }
             }
             Text("\(Int(value.wrappedValue))")
                 .monospacedDigit()
@@ -443,27 +444,46 @@ struct MenuBarPanel: View {
             get: { client.state[keyPath: keyPath] },
             set: { on in
                 if keyPath == \LightState.mainPower {
-                    autoController.userTookMainControl()
-                    Task { try? await client.setPower(on) }
+                    controls.setMainPower(on)
                 } else {
-                    autoController.userTookBacklightControl()
-                    if chromaEnabled && client.chromaConnected {
-                        client.chroma.bgSetPower(on)
-                        client.projectBacklightPower(on)
-                    } else {
-                        Task { try? await client.setBGPower(on) }
-                    }
+                    controls.setBacklightPower(on)
                 }
             }
         )
     }
 
-    private func debounced(_ action: @escaping () -> Void) {
-        debounce?.cancel()
-        let work = DispatchWorkItem {
-            Task { action() }
-        }
-        debounce = work
+    private func debouncedColor(_ action: @escaping () -> Void) {
+        colorDebounce?.cancel()
+        let work = DispatchWorkItem { Task { @MainActor in action() } }
+        colorDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
+    private func debouncedSegment(_ action: @escaping () -> Void) {
+        segmentDebounce?.cancel()
+        let work = DispatchWorkItem { Task { @MainActor in action() } }
+        segmentDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
+    private func debouncedMain(_ action: @escaping () -> Void) {
+        mainBrightDebounce?.cancel()
+        let work = DispatchWorkItem { Task { @MainActor in action() } }
+        mainBrightDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
+    private func debouncedCT(_ action: @escaping () -> Void) {
+        ctDebounce?.cancel()
+        let work = DispatchWorkItem { Task { @MainActor in action() } }
+        ctDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
+    }
+
+    private func debouncedBG(_ action: @escaping () -> Void) {
+        bgBrightDebounce?.cancel()
+        let work = DispatchWorkItem { Task { @MainActor in action() } }
+        bgBrightDebounce = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
     }
 

@@ -82,7 +82,33 @@ final class SceneScheduleTests: XCTestCase {
         let due = schedule.dueEntries(
             at: date(2026, 8, 9, 23, 30),
             appliedDays: [:],
-            calendar: calendar)
+            calendar: calendar,
+            policy: .replayAll)
         XCTAssertEqual(due.map(\.sceneName), ["专注", "阅读", "放松", "睡眠"])
+    }
+
+    func testDueEntriesLatestOnlyReturnsMostRecentElapsedSlot() {
+        var schedule = SceneSchedule.defaultSchedule()
+        for index in schedule.entries.indices {
+            schedule.entries[index].enabled = true
+        }
+        let due = schedule.dueEntries(
+            at: date(2026, 8, 9, 23, 30),
+            appliedDays: [:],
+            calendar: calendar)
+        XCTAssertEqual(due.map(\.sceneName), ["睡眠"])
+    }
+
+    func testLatestOnlyPolicyHandlesMidnightRollover() {
+        let entry = SceneScheduleEntry(
+            id: 1, hour: 0, minute: 5, sceneName: "夜间", enabled: true)
+        let schedule = SceneSchedule(entries: [entry])
+        let yesterday = date(2026, 8, 8, 0, 0)
+        let afterMidnight = date(2026, 8, 9, 0, 15)
+
+        XCTAssertTrue(schedule.isDue(entry, at: afterMidnight, appliedOn: yesterday, calendar: calendar))
+        XCTAssertEqual(
+            schedule.dueEntries(at: afterMidnight, appliedDays: [:], calendar: calendar).map(\.id),
+            [1])
     }
 }

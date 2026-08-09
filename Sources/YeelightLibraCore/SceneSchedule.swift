@@ -11,6 +11,14 @@ struct SceneScheduleEntry: Codable, Equatable, Identifiable {
     var minutesSinceMidnight: Int { hour * 60 + minute }
 }
 
+/// Defines what happens when the app starts after more than one slot has
+/// elapsed. Latest-only avoids flashing through historical scenes; replay-all
+/// remains available for callers that explicitly want event replay.
+enum SceneCatchUpPolicy: Equatable {
+    case latestOnly
+    case replayAll
+}
+
 /// A fixed set of daily scene slots (up to 4).
 struct SceneSchedule: Codable, Equatable {
     var entries: [SceneScheduleEntry]
@@ -40,9 +48,10 @@ struct SceneSchedule: Codable, Equatable {
     func dueEntries(
         at date: Date,
         appliedDays: [Int: Date],
-        calendar: Calendar
+        calendar: Calendar,
+        policy: SceneCatchUpPolicy = .latestOnly
     ) -> [SceneScheduleEntry] {
-        entries
+        let due = entries
             .filter { isDue($0, at: date, appliedOn: appliedDays[$0.id], calendar: calendar) }
             .sorted {
                 if $0.minutesSinceMidnight == $1.minutesSinceMidnight {
@@ -50,5 +59,7 @@ struct SceneSchedule: Codable, Equatable {
                 }
                 return $0.minutesSinceMidnight < $1.minutesSinceMidnight
             }
+        guard policy == .latestOnly, let latest = due.last else { return due }
+        return [latest]
     }
 }
