@@ -74,6 +74,8 @@ Sources/
     AppDelegate.swift      # 应用生命周期、状态栏项
     Logger.swift           # 文件日志
   YeelightLibra/        # 可执行入口（AppMain.swift）
+Assets/
+  AppIcon.png            # macOS 应用图标源图（make_app.sh 生成 AppIcon.icns）
 Tests/
   YeelightLibraTests/   # 单元测试
 ```
