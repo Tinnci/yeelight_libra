@@ -10,6 +10,8 @@ import Combine
 /// arbitrary Tasks.
 @MainActor
 final class YeelightClient: ObservableObject {
+    typealias CommandHandler = @MainActor (String, [Any]) async throws -> [Any]
+
     @Published var state = LightState()
     @Published var isConnected = false
     @Published private(set) var capabilities = DeviceCapabilities()
@@ -65,10 +67,12 @@ final class YeelightClient: ObservableObject {
     private var generation = 0
     private var chromaCancellable: AnyCancellable?
     private var hasMainPowerProperty = false
+    private let commandHandler: CommandHandler?
 
-    init(host: String) {
+    init(host: String, commandHandler: CommandHandler? = nil) {
         self.host = host
         self.chroma = ChromaSession(host: host)
+        self.commandHandler = commandHandler
         bindChroma()
     }
 
@@ -276,6 +280,10 @@ final class YeelightClient: ObservableObject {
 
     @discardableResult
     func command(_ method: String, _ params: [Any]) async throws -> [Any] {
+        if let commandHandler {
+            return try await commandHandler(method, params)
+        }
+
         let id = nextID
         nextID += 1
         let data = try YeelightProtocol.commandLine(id: id, method: method, params: params)
@@ -319,6 +327,7 @@ final class YeelightClient: ObservableObject {
     func setPower(_ on: Bool) async throws {
         let previousBacklight = state.bgPower
         _ = try await command("set_power", [on ? "on" : "off", "smooth", 500])
+        projectMainPower(on)
 
         // Some dual-zone devices couple `set_power` to the background light.
         // Reassert the previous background state so this API remains a main
@@ -339,6 +348,7 @@ final class YeelightClient: ObservableObject {
 
     func setBGPower(_ on: Bool) async throws {
         _ = try await command("bg_set_power", [on ? "on" : "off", "smooth", 500])
+        projectBacklightPower(on)
         if !on {
             try? await Task.sleep(nanoseconds: 400_000_000)
             if let result = try? await command("get_prop", ["bg_power"]),
@@ -387,6 +397,23 @@ final class YeelightClient: ObservableObject {
     /// The protocol takes the delay directly in minutes.
     func setCronOff(afterMinutes minutes: Int) async throws {
         _ = try await command("cron_add", Self.cronOffParameters(afterMinutes: minutes))
+    }
+
+    /// Reflect a successful fire-and-forget Chroma power command immediately.
+    /// The next TCP `props`/`get_prop` update remains authoritative.
+    func projectBacklightPower(_ on: Bool) {
+        var updated = state
+        updated.bgPower = on
+        state = updated
+    }
+
+    private func projectMainPower(_ on: Bool) {
+        var updated = state
+        updated.mainPower = on
+        if !hasMainPowerProperty {
+            updated.power = on
+        }
+        state = updated
     }
 
     /// Remaining delay in minutes of the scheduled power-off, or nil.

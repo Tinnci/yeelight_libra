@@ -449,6 +449,7 @@ struct MenuBarPanel: View {
                     autoController.userTookBacklightControl()
                     if chromaEnabled && client.chromaConnected {
                         client.chroma.bgSetPower(on)
+                        client.projectBacklightPower(on)
                     } else {
                         Task { try? await client.setBGPower(on) }
                     }

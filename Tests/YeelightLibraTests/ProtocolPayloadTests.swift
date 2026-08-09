@@ -90,3 +90,34 @@ final class LightStateMappingTests: XCTestCase {
         XCTAssertTrue(state.mainPower)
     }
 }
+
+@MainActor
+final class YeelightClientStateProjectionTests: XCTestCase {
+    func testSuccessfulSetPowerUpdatesMainPowerWithoutPropsNotification() async throws {
+        let client = YeelightClient(
+            host: "192.168.1.10",
+            commandHandler: { _, _ in [] })
+        client.state.mainPower = true
+        client.state.power = true
+
+        try await client.setPower(false)
+
+        XCTAssertFalse(client.state.mainPower)
+        XCTAssertFalse(client.state.power)
+    }
+
+    func testSleepSceneProjectsMainAndBacklightPowerWithoutPropsNotification() async throws {
+        let client = YeelightClient(
+            host: "192.168.1.10",
+            commandHandler: { _, _ in [] })
+        client.state.mainPower = true
+        client.state.power = true
+        client.state.bgPower = false
+
+        try await client.applyScene(.sleep)
+
+        XCTAssertFalse(client.state.mainPower)
+        XCTAssertFalse(client.state.power)
+        XCTAssertTrue(client.state.bgPower)
+    }
+}
