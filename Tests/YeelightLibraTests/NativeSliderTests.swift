@@ -3,6 +3,7 @@ import AppKit
 import SwiftUI
 @testable import YeelightLibraCore
 
+@MainActor
 final class NativeSliderTests: XCTestCase {
     private func makeSlider() -> NSSlider {
         let slider = NSSlider(frame: NSRect(x: 0, y: 0, width: 200, height: 20))

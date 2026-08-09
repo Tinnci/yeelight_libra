@@ -73,4 +73,16 @@ final class SceneScheduleTests: XCTestCase {
         // ...but a slot that was never applied today is still due after its time.
         XCTAssertTrue(due.isDue(sleepOn, at: date(2026, 8, 9, 23, 30), appliedOn: nil, calendar: calendar))
     }
+
+    func testDueEntriesAreChronological() {
+        var schedule = SceneSchedule.defaultSchedule()
+        for index in schedule.entries.indices {
+            schedule.entries[index].enabled = true
+        }
+        let due = schedule.dueEntries(
+            at: date(2026, 8, 9, 23, 30),
+            appliedDays: [:],
+            calendar: calendar)
+        XCTAssertEqual(due.map(\.sceneName), ["专注", "阅读", "放松", "睡眠"])
+    }
 }

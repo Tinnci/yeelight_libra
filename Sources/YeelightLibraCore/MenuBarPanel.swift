@@ -35,6 +35,7 @@ struct NativeSlider: NSViewRepresentable {
         Coordinator(self)
     }
 
+    @MainActor
     final class Coordinator: NSObject {
         var parent: NativeSlider
 
@@ -70,12 +71,14 @@ struct MenuBarPanel: View {
             Divider()
 
             sectionTitle("主灯")
-            Toggle(isOn: powerBinding(\.power)) { Text("电源") }
+            Toggle(isOn: powerBinding(\.mainPower)) { Text("电源") }
                 .toggleStyle(.switch)
             sliderRow("亮度", value: $bright, range: 1...100) { value in
+                autoController.userTookMainControl()
                 Task { try? await client.setBright(Int(value)) }
             }
             sliderRow("色温", value: $ct, range: 2700...6500) { value in
+                autoController.userTookMainControl()
                 Task { try? await client.setCT(Int(value)) }
             }
 
@@ -85,6 +88,7 @@ struct MenuBarPanel: View {
             Toggle(isOn: powerBinding(\.bgPower)) { Text("电源") }
                 .toggleStyle(.switch)
             sliderRow("亮度", value: $bgBright, range: 1...100) { value in
+                autoController.userTookBacklightControl()
                 Task { try? await client.setBGBright(Int(value)) }
             }
             HStack {
@@ -102,7 +106,6 @@ struct MenuBarPanel: View {
                 }
                 .controlSize(.small)
             }
-
             Divider()
 
             sectionTitle("场景")
@@ -110,6 +113,7 @@ struct MenuBarPanel: View {
                 ForEach(ScenePreset.all) { scene in
                     Button(scene.name) {
                         autoController.userTookBacklightControl()
+                        autoController.userTookMainControl()
                         Task { try? await client.applyScene(scene) }
                     }
                 }
@@ -190,9 +194,9 @@ struct MenuBarPanel: View {
                 Text("1 小时").tag(60)
                 Text("2 小时").tag(120)
             }
-            .disabled(!client.state.power)
+            .disabled(!client.state.mainPower)
             .onChange(of: cronOption) { _, newValue in
-                guard client.state.power else { cronOption = 0; return }
+                guard client.state.mainPower else { cronOption = 0; return }
                 if newValue == 0 {
                     Task { try? await client.cancelCronOff() }
                 } else {
@@ -204,7 +208,10 @@ struct MenuBarPanel: View {
                 Button("呼吸") { startFlow(.breath) }
                 Button("彩虹") { startFlow(.rainbow) }
                 Button("极光") { startFlow(.aurora) }
-                Button("停止") { Task { try? await client.stopBGColorFlow() } }
+                Button("停止") {
+                    autoController.userTookBacklightControl()
+                    Task { try? await client.stopBGColorFlow() }
+                }
                 Spacer()
             }
             .buttonStyle(.borderless)
@@ -216,19 +223,23 @@ struct MenuBarPanel: View {
             HStack {
                 ColorPicker("左", selection: $segLeft, supportsOpacity: false)
                     .onChange(of: segLeft) { _, c in
+                        autoController.userTookBacklightControl()
                         debounced { sendSegment(0, 0, c) }
                     }
                 ColorPicker("右", selection: $segRight, supportsOpacity: false)
                     .onChange(of: segRight) { _, c in
+                        autoController.userTookBacklightControl()
                         debounced { sendSegment(1, 1, c) }
                     }
                 Spacer()
                 Button("整条") {
+                    autoController.userTookBacklightControl()
                     let c = segLeft
                     debounced { sendSegment(0, 255, c) }
                 }
                 .controlSize(.small)
             }
+            .disabled(!client.supports("set_segment_rgb"))
 
             Divider()
 
@@ -250,7 +261,7 @@ struct MenuBarPanel: View {
             syncFromState()
             if chromaEnabled { client.chroma.start() }
             Task {
-                if client.state.power, let minutes = try? await client.getCronOffDelayMinutes() {
+                if client.state.mainPower, let minutes = try? await client.getCronOffDelayMinutes() {
                     cronOption = minutes
                 }
             }
@@ -275,16 +286,17 @@ struct MenuBarPanel: View {
         var expression: String {
             switch self {
             case .breath:
-                return "1200, 1, 16711680, 60; 1200, 1, 16711680, 5"
+                return FlowExpression.breath
             case .rainbow:
-                return "500, 3, 0, 100; 500, 3, 60, 100; 500, 3, 120, 100; 500, 3, 180, 100; 500, 3, 240, 100; 500, 3, 300, 100"
+                return FlowExpression.rainbow
             case .aurora:
-                return "800, 1, 65280, 40; 800, 1, 65535, 60; 800, 1, 16711935, 50; 800, 1, 16711680, 40"
+                return FlowExpression.aurora
             }
         }
     }
 
     private func startFlow(_ preset: FlowPreset) {
+        autoController.userTookBacklightControl()
         let expression = preset.expression
         Task { try? await client.startBGColorFlow(expression) }
     }
@@ -430,12 +442,14 @@ struct MenuBarPanel: View {
         Binding(
             get: { client.state[keyPath: keyPath] },
             set: { on in
-                if keyPath == \LightState.power {
+                if keyPath == \LightState.mainPower {
+                    autoController.userTookMainControl()
                     Task { try? await client.setPower(on) }
                 } else {
                     autoController.userTookBacklightControl()
                     if chromaEnabled && client.chromaConnected {
                         client.chroma.bgSetPower(on)
+                        client.projectBacklightPower(on)
                     } else {
                         Task { try? await client.setBGPower(on) }
                     }

@@ -8,7 +8,7 @@ macOS 菜单栏应用，用于通过局域网协议控制 Yeelight Libra 屏幕�
 
 - 主灯：电源开关、亮度（1–100）、色温（2700–6500K）
 - 背灯：电源开关、亮度、RGB 颜色选择、一键恢复默认色
-- 定时关灯：30 分钟 / 1 小时 / 2 小时（使用设备端 cron，30 分钟为单位）
+- 定时关灯：30 分钟 / 1 小时 / 2 小时（使用设备端 cron，按协议直接传递分钟数）
 - 背光流光：呼吸、彩虹、极光预设，可随时停止（无限循环）
 - 分段背光（实验性）：左 / 右 / 整条设置 RGB，段索引因设备而异，请目视验证
 - 影院模式：一键沉浸模式，主灯调暗变暖，背光以低亮度慢速环境流光（类似 Hue 动态氛围），关闭时自动恢复之前的状态
@@ -60,7 +60,8 @@ open YeelightLibra.app
 Sources/
   YeelightLibraCore/   # 业务逻辑（网络、状态、UI）
     YeelightClient.swift   # TCP 命令客户端（连接管理、重连、命令超时）
-    ChromaSession.swift    # UDP Chroma 通道
+    ChromaSession.swift    # UDP Chroma 通道（token 会话、保活、重连）
+    ProtocolSupport.swift   # 协议编码、能力发现、状态映射、流光表达式
     LightState.swift       # 设备状态镜像
     ScenePreset.swift      # 场景预设
     CircadianSchedule.swift # 昼夜节律时刻表（锚点 + 线性插值）
@@ -73,6 +74,8 @@ Sources/
     AppDelegate.swift      # 应用生命周期、状态栏项
     Logger.swift           # 文件日志
   YeelightLibra/        # 可执行入口（AppMain.swift）
+Assets/
+  AppIcon.png            # macOS 应用图标源图（make_app.sh 生成 AppIcon.icns）
 Tests/
   YeelightLibraTests/   # 单元测试
 ```

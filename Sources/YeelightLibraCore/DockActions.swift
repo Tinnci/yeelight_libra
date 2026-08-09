@@ -1,8 +1,10 @@
 import AppKit
 
 /// Builds the menu shown when right-clicking / long-pressing the Dock icon.
+@MainActor
 final class DockActions: NSObject {
     var client: YeelightClient?
+    var autoController: AutoModeController?
     var showPanel: (() -> Void)?
 
     func menu() -> NSMenu {
@@ -15,7 +17,7 @@ final class DockActions: NSObject {
         menu.addItem(.separator())
 
         let mainPower = NSMenuItem(
-            title: (state?.power ?? false) ? "关闭主灯" : "打开主灯",
+            title: (state?.mainPower ?? false) ? "关闭主灯" : "打开主灯",
             action: #selector(toggleMain(_:)),
             keyEquivalent: ""
         )
@@ -68,21 +70,25 @@ final class DockActions: NSObject {
 
     @objc private func toggleMain(_ sender: Any?) {
         guard let client else { return }
-        Task { try? await client.setPower(!client.state.power) }
+        autoController?.userTookMainControl()
+        Task { try? await client.setPower(!client.state.mainPower) }
     }
 
     @objc private func toggleBG(_ sender: Any?) {
         guard let client else { return }
+        autoController?.userTookBacklightControl()
         Task { try? await client.setBGPower(!client.state.bgPower) }
     }
 
     @objc private func setMainBright(_ sender: NSMenuItem) {
         guard let client else { return }
+        autoController?.userTookMainControl()
         Task { try? await client.setBright(sender.tag) }
     }
 
     @objc private func setBGBright(_ sender: NSMenuItem) {
         guard let client else { return }
+        autoController?.userTookBacklightControl()
         Task { try? await client.setBGBright(sender.tag) }
     }
 
