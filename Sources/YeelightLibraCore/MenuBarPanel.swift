@@ -145,6 +145,42 @@ struct MenuBarPanel: View {
                 }
             }
 
+            Toggle("日出唤醒", isOn: $autoController.wakeUpEnabled)
+                .toggleStyle(.switch)
+            if autoController.wakeUpEnabled {
+                HStack(spacing: 8) {
+                    Text("唤醒时间").frame(width: 60, alignment: .leading)
+                    DatePicker("", selection: $autoController.wakeUpAlarmDate, displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                    Spacer()
+                    Picker("时长", selection: $autoController.wakeUpRampMinutes) {
+                        Text("15 分钟").tag(15)
+                        Text("30 分钟").tag(30)
+                        Text("45 分钟").tag(45)
+                        Text("60 分钟").tag(60)
+                    }
+                    .controlSize(.small)
+                }
+                if let progress = autoController.wakeUpProgress {
+                    ProgressView(value: progress)
+                        .controlSize(.small)
+                }
+                if !autoController.wakeUpStatusText.isEmpty {
+                    Text(autoController.wakeUpStatusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Toggle("定时场景", isOn: scheduleMasterBinding)
+                .toggleStyle(.switch)
+            if autoController.sceneSchedule.entries.contains(where: { $0.enabled }) {
+                ForEach(autoController.sceneSchedule.entries.indices, id: \.self) { index in
+                    scheduleRow(at: index)
+                }
+            }
+            Toggle("显示器休眠联动", isOn: $autoController.displayLinkEnabled)
+                .toggleStyle(.switch)
+
             Divider()
 
             sectionTitle("定时与流光")
@@ -309,6 +345,52 @@ struct MenuBarPanel: View {
     }
 
     // MARK: - Helpers
+
+    private var scheduleMasterBinding: Binding<Bool> {
+        Binding(
+            get: { autoController.sceneSchedule.entries.contains(where: { $0.enabled }) },
+            set: { on in
+                for index in autoController.sceneSchedule.entries.indices {
+                    autoController.sceneSchedule.entries[index].enabled = on
+                }
+            }
+        )
+    }
+
+    private func scheduleTimeBinding(for index: Int) -> Binding<Date> {
+        Binding(
+            get: {
+                let entry = autoController.sceneSchedule.entries[index]
+                let calendar = Calendar.current
+                return calendar.date(bySettingHour: entry.hour, minute: entry.minute, second: 0, of: Date()) ?? Date()
+            },
+            set: { date in
+                let calendar = Calendar.current
+                autoController.sceneSchedule.entries[index].hour = calendar.component(.hour, from: date)
+                autoController.sceneSchedule.entries[index].minute = calendar.component(.minute, from: date)
+            }
+        )
+    }
+
+    private func scheduleRow(at index: Int) -> some View {
+        HStack(spacing: 8) {
+            Toggle("", isOn: $autoController.sceneSchedule.entries[index].enabled)
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .controlSize(.mini)
+            DatePicker("", selection: scheduleTimeBinding(for: index), displayedComponents: .hourAndMinute)
+                .labelsHidden()
+                .controlSize(.small)
+            Picker("", selection: $autoController.sceneSchedule.entries[index].sceneName) {
+                ForEach(ScenePreset.all) { scene in
+                    Text(scene.name).tag(scene.name)
+                }
+            }
+            .labelsHidden()
+            .controlSize(.small)
+            Spacer()
+        }
+    }
 
     private func sectionTitle(_ title: String) -> some View {
         Text(title)

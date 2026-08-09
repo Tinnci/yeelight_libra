@@ -65,7 +65,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             pop.behavior = .transient
             let hosting = NSHostingController(rootView: MenuBarPanel(client: client, autoController: autoController))
             hosting.sizingOptions = []
-            hosting.view.frame = NSRect(x: 0, y: 0, width: 360, height: 760)
+            hosting.view.frame = NSRect(x: 0, y: 0, width: 360, height: 900)
             pop.contentViewController = hosting
             pop.contentSize = hosting.view.frame.size
             popover = pop
