@@ -11,6 +11,9 @@ macOS 菜单栏应用，用于通过局域网协议控制 Yeelight Libra 屏幕�
 - 定时关灯：30 分钟 / 1 小时 / 2 小时（使用设备端 cron，30 分钟为单位）
 - 背光流光：呼吸、彩虹、极光预设，可随时停止（无限循环）
 - 分段背光（实验性）：左 / 右 / 整条设置 RGB，段索引因设备而异，请目视验证
+- 影院模式：一键沉浸模式，主灯调暗变暖，背光以低亮度慢速环境流光（类似 Hue 动态氛围），关闭时自动恢复之前的状态
+- 屏幕同步：Hue Sync 风格，实时采样屏幕边缘主色调并驱动背光（约 5Hz，带颜色迟滞防闪烁；优先走 Chroma UDP，回退 TCP 限流；需在系统设置 → 隐私与安全性 → 屏幕录制中授权后重启应用）
+- 昼夜节律：根据当前时段自动平滑调整主灯色温与亮度（日出 → 正午 → 傍晚 → 夜间，线性插值，每 5 分钟评估一次；仅在主灯开启时生效）
 - Chroma UDP 通道：可选的低延迟控制通道（UDP 55444 token 会话），开关实时反映连接状态
 - Dock 菜单：打开控制面板、主灯/背灯开关与亮度快捷项、刷新状态、退出
 - 设备 IP 切换：面板内直接修改，自动持久化（`UserDefaults` 键 `deviceIP`）并重建连接
@@ -56,6 +59,10 @@ Sources/
     YeelightClient.swift   # TCP 命令客户端（连接管理、重连、命令超时）
     ChromaSession.swift    # UDP Chroma 通道
     LightState.swift       # 设备状态镜像
+    ScenePreset.swift      # 场景预设
+    CircadianSchedule.swift # 昼夜节律时刻表（锚点 + 线性插值）
+    AutoModeController.swift # 智能模式（影院 / 昼夜节律 / 屏幕同步）
+    ScreenColorSampler.swift  # 屏幕取色（边缘主色提取 + 截屏采样）
     MenuBarPanel.swift     # 菜单栏面板（含 AppKit NSSlider 封装）
     DockActions.swift      # Dock 菜单
     AppDelegate.swift      # 应用生命周期、状态栏项

@@ -51,6 +51,7 @@ struct NativeSlider: NSViewRepresentable {
 
 struct MenuBarPanel: View {
     @ObservedObject var client: YeelightClient
+    @ObservedObject var autoController: AutoModeController
 
     @State private var bright: Double = 10
     @State private var ct: Double = 3200
@@ -91,10 +92,12 @@ struct MenuBarPanel: View {
                     .onChange(of: bgColor) { _, newColor in
                         let rgb = Self.rgbInt(from: newColor)
                         guard rgb != client.state.bgRGB else { return }
+                        autoController.userTookBacklightControl()
                         debounced { sendBGColor(rgb) }
                     }
                 Spacer()
                 Button("恢复") {
+                    autoController.userTookBacklightControl()
                     debounced { sendBGColor(LightState().bgRGB) }
                 }
                 .controlSize(.small)
@@ -106,6 +109,7 @@ struct MenuBarPanel: View {
             HStack {
                 ForEach(ScenePreset.all) { scene in
                     Button(scene.name) {
+                        autoController.userTookBacklightControl()
                         Task { try? await client.applyScene(scene) }
                     }
                 }
@@ -113,6 +117,33 @@ struct MenuBarPanel: View {
             }
             .buttonStyle(.borderless)
             .controlSize(.small)
+
+            Divider()
+
+            sectionTitle("智能模式")
+            Toggle("影院模式", isOn: $autoController.cinemaEnabled)
+                .toggleStyle(.switch)
+            Toggle("昼夜节律", isOn: $autoController.circadianEnabled)
+                .toggleStyle(.switch)
+            if !autoController.circadianTargetText.isEmpty {
+                Text(autoController.circadianTargetText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Toggle("屏幕同步", isOn: $autoController.screenSyncEnabled)
+                .toggleStyle(.switch)
+            if !autoController.screenSyncStatusText.isEmpty {
+                HStack(spacing: 6) {
+                    if let syncColor = autoController.screenSyncColor {
+                        Circle()
+                            .fill(Self.color(fromRGB: (syncColor.r << 16) | (syncColor.g << 8) | syncColor.b))
+                            .frame(width: 8, height: 8)
+                    }
+                    Text(autoController.screenSyncStatusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
 
             Divider()
 
@@ -320,6 +351,7 @@ struct MenuBarPanel: View {
                 if keyPath == \LightState.power {
                     Task { try? await client.setPower(on) }
                 } else {
+                    autoController.userTookBacklightControl()
                     if chromaEnabled && client.chromaConnected {
                         client.chroma.bgSetPower(on)
                     } else {
